@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Transcoding Manager</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3b82f6;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --queued: #6366f1;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    header h1 { font-size: 1.35rem; font-weight: 600; }
+    header p { color: var(--muted); font-size: 0.9rem; margin-top: 0.25rem; }
+    main { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+    section { margin-bottom: 2.5rem; }
+    h2 {
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+    }
+    .upload-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr auto;
+      gap: 1rem;
+      align-items: end;
+    }
+    @media (max-width: 900px) {
+      .upload-form { grid-template-columns: 1fr 1fr; }
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    input, select, button {
+      font: inherit;
+      padding: 0.55rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      width: 100%;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    button:hover { filter: brightness(1.1); }
+    button.danger {
+      background: transparent;
+      border-color: var(--danger);
+      color: var(--danger);
+      padding: 0.35rem 0.6rem;
+      font-size: 0.8rem;
+    }
+    button.danger:hover { background: rgba(239, 68, 68, 0.15); }
+    .nodes-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+    @media (max-width: 768px) {
+      .nodes-grid { grid-template-columns: 1fr; }
+    }
+    .node-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .node-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .node-name { font-weight: 600; }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .status-idle .status-dot, .status-busy .status-dot { background: var(--success); }
+    .status-suspected .status-dot { background: var(--warning); }
+    .status-offline .status-dot { background: var(--danger); }
+    .status-offline { color: var(--danger); }
+    .metric-bar {
+      height: 6px;
+      background: var(--bg);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .metric-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .metric-row {
+      font-size: 0.85rem;
+      margin-bottom: 0.6rem;
+      color: var(--muted);
+    }
+    .metric-row span { color: var(--text); float: right; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.65rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 0.8rem; }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-queued { background: rgba(99, 102, 241, 0.2); color: var(--queued); }
+    .badge-running { background: rgba(59, 130, 246, 0.2); color: var(--accent); }
+    .badge-completed { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .badge-failed { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+    .task-list {
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .task-list li { margin: 0.2rem 0; }
+    .task-running { color: var(--accent); }
+    .empty { color: var(--muted); text-align: center; padding: 2rem; }
+    a.download {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+    }
+    a.download:hover { text-decoration: underline; }
+    .progress-mini {
+      display: inline-block;
+      width: 48px;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Distributed Video Transcoding</h1>
+    <p>Upload videos, monitor parallel segment encoding across worker nodes, and download results.</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>New Job</h2>
+      <div class="card">
+        <form class="upload-form" id="uploadForm">
+          <div>
+            <label for="video">Video file</label>
+            <input type="file" id="video" name="video" accept="video/*" required>
+          </div>
+          <div>
+            <label for="resolution">Resolution</label>
+            <select id="resolution" name="resolution">
+              <option value="1920x1080">1920×1080</option>
+              <option value="1280x720" selected>1280×720</option>
+              <option value="854x480">854×480</option>
+              <option value="640x360">640×360</option>
+            </select>
+          </div>
+          <div>
+            <label for="format">Format</label>
+            <select id="format" name="format">
+              <option value="mp4" selected>MP4</option>
+              <option value="webm">WebM</option>
+              <option value="mkv">MKV</option>
+            </select>
+          </div>
+          <div>
+            <label for="bitrate">Bitrate</label>
+            <select id="bitrate" name="bitrate">
+              <option value="1M">1 Mbps</option>
+              <option value="2M" selected>2 Mbps</option>
+              <option value="4M">4 Mbps</option>
+              <option value="8M">8 Mbps</option>
+            </select>
+          </div>
+          <button type="submit">Submit Job</button>
+        </form>
+      </div>
+    </section>
+
+    <section>
+      <h2>Worker Nodes</h2>
+      <div class="nodes-grid" id="nodesGrid">
+        <div class="empty">Loading nodes…</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Jobs</h2>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Job ID</th>
+              <th>File</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Settings</th>
+              <th>Tasks</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobsBody">
+            <tr><td colspan="7" class="empty">No jobs yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const POLL_MS = 3000;
+
+    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+      const btn = form.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      btn.textContent = 'Uploading…';
+      try {
+        const res = await fetch('/jobs', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const err = await res.json();
+          alert(err.error || 'Upload failed');
+          return;
+        }
+        form.reset();
+        await refresh();
+      } catch (err) {
+        alert('Upload failed: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Submit Job';
+      }
+    });
+
+    async function refresh() {
+      await Promise.all([loadNodes(), loadJobs()]);
+    }
+
+    async function loadNodes() {
+      const grid = document.getElementById('nodesGrid');
+      try {
+        const res = await fetch('/nodes');
+        const nodes = await res.json();
+        if (!nodes.length) {
+          grid.innerHTML = '<div class="empty">No workers registered</div>';
+          return;
+        }
+        grid.innerHTML = nodes.map(n => `
+          <div class="node-card status-${n.status}">
+            <div class="node-header">
+              <span class="node-name">${n.name}</span>
+              <span class="status-label">
+                <span class="status-dot"></span>${n.status}
+              </span>
+            </div>
+            <div class="metric-row">
+              CPU <span>${n.cpu_percent.toFixed(1)}%</span>
+              <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, n.cpu_percent)}%"></div></div>
+            </div>
+            <div class="metric-row">
+              Memory <span>${n.memory_used_mb.toFixed(0)} / ${n.memory_total_mb.toFixed(0)} MiB (${n.memory_percent.toFixed(1)}%)</span>
+              <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, n.memory_percent)}%"></div></div>
+            </div>
+            ${n.current_task_id ? `<div class="metric-row">Task: <span>${n.current_task_id}</span></div>` : ''}
+          </div>
+        `).join('');
+      } catch (err) {
+        grid.innerHTML = '<div class="empty">Failed to load nodes</div>';
+      }
+    }
+
+    function displayStatus(job) {
+      if (job.error) return { label: 'failed', badge: 'failed' };
+      if (job.status === 'splitting' || job.status === 'merging') {
+        return { label: job.status, badge: 'running' };
+      }
+      return { label: job.status, badge: job.status };
+    }
+
+    async function loadJobs() {
+      const tbody = document.getElementById('jobsBody');
+      try {
+        const listRes = await fetch('/jobs');
+        const jobs = await listRes.json();
+        if (!jobs.length) {
+          tbody.innerHTML = '<tr><td colspan="7" class="empty">No jobs yet</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = jobs.map(job => {
+          const tasks = job.tasks || [];
+          const progress = tasks.length
+            ? Math.round(100 * tasks.filter(t => t.status === 'completed').length / tasks.length)
+            : (job.status === 'queued' ? 0 : (job.status === 'completed' ? 100 : '—'));
+
+          const taskHtml = tasks.length
+            ? `<ul class="task-list">${tasks.map(t => {
+                const worker = t.assigned_worker ? ` → ${t.assigned_worker}` : '';
+                const cls = t.status === 'running' ? 'task-running' : '';
+                const prog = t.status === 'running' ? ` <span class="progress-mini">${t.progress}%</span>` : '';
+                return `<li class="${cls}">Segment ${t.segment_index + 1}: ${t.status}${worker}${prog}</li>`;
+              }).join('')}</ul>`
+            : (job.status === 'splitting' ? 'Splitting video…' : '—');
+
+          const { label, badge } = displayStatus(job);
+          let actions = '—';
+          if (job.status === 'queued') {
+            actions = `<button class="danger" onclick="deleteJob('${job.job_id}')">Delete</button>`;
+          } else if (job.status === 'completed' && job.output_path && !job.error) {
+            actions = `<a class="download" href="/jobs/${job.job_id}/download">Download</a>`;
+          } else if (job.error) {
+            actions = `<span style="color:var(--danger);font-size:0.8rem">${job.error}</span>`;
+          }
+
+          return `
+            <tr>
+              <td><code>${job.job_id}</code></td>
+              <td>${job.filename}</td>
+              <td><span class="badge badge-${badge}">${label}</span></td>
+              <td>${typeof progress === 'number' ? progress + '%' : progress}</td>
+              <td>${job.resolution} · ${job.format} · ${job.bitrate}</td>
+              <td>${taskHtml}</td>
+              <td>${actions}</td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">Failed to load jobs</td></tr>';
+      }
+    }
+
+    async function deleteJob(jobId) {
+      if (!confirm('Delete this queued job?')) return;
+      const res = await fetch(`/jobs/${jobId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.error || 'Delete failed');
+        return;
+      }
+      await refresh();
+    }
+
+    refresh();
+    setInterval(refresh, POLL_MS);
+  </script>
+</body>
+</html>

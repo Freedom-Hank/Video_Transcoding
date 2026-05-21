@@ -1,0 +1,198 @@
+# 分散式影片轉檔系統
+
+這是一個以 `manager` / `worker` 架構實作的分散式影片轉檔專案。系統會先把上傳的影片依 GOP / keyframe 邊界切成片段，再把片段分派到多個 Worker 平行編碼，最後由 Manager 合併成最終輸出檔。
+
+專案提供網頁管理介面，可用來上傳影片、查看任務狀態、監看 Worker 節點健康狀況，並下載已完成的輸出結果。
+
+## 特色
+
+- 影片上傳後自動建立轉檔工作
+- 先切片，再由多個 Worker 平行編碼
+- Worker 會自動註冊、輪詢任務並回報進度
+- 支援節點心跳監控與失聯任務重排
+- 提供簡單的 Web UI 與 REST API
+- 使用 Docker Compose 一次啟動 Manager 與多個 Worker
+
+## 系統架構
+
+- `manager`
+  - 提供 Web UI
+  - 接收上傳、建立工作、查詢工作狀態
+  - 負責切片、合併與任務排程
+  - 監控 Worker 心跳與健康狀態
+- `worker`
+  - 啟動後向 Manager 註冊
+  - 輪詢取得編碼任務
+  - 使用 FFmpeg 對影片片段進行轉檔
+  - 回報進度、完成與失敗狀態
+- `shared-volume`
+  - 由主機資料夾掛載到容器內的 `/data`
+  - 保存 `uploads/`、`segments/`、`outputs/`
+
+## 專案目錄
+
+```text
+├── docker-compose.yml
+├── manager/
+│   ├── app.py
+│   ├── scheduler.py
+│   ├── splitter.py
+│   ├── merger.py
+│   ├── health_monitor.py
+│   └── static/index.html
+└── worker/
+    ├── app.py
+    ├── encoder.py
+    └── metrics.py
+```
+
+## 需求
+
+- Docker
+- Docker Compose
+
+容器內已安裝：
+
+- `ffmpeg`
+- `ffprobe`
+- `procps`（Worker 端用於讀取 `top`）
+
+## 快速開始
+
+### 1. 啟動服務
+
+```bash
+docker-compose up --build
+```
+
+啟動後，開啟：
+
+```text
+http://localhost:8080
+```
+
+### 2. 背景執行
+
+```bash
+docker-compose up -d --build
+```
+
+### 3. 停止服務
+
+```bash
+docker-compose down
+```
+
+## 使用流程
+
+1. 在 Manager 網頁上傳影片。
+2. 選擇輸出解析度、格式與位元率。
+3. Manager 先將原始影片切成片段。
+4. Worker 依序從任務佇列領取片段並平行編碼。
+5. 所有片段完成後，Manager 將結果合併成單一輸出檔。
+6. 工作完成後，可從管理介面下載成品。
+
+## 預設行為
+
+- 預設輸出解析度：`1280x720`
+- 預設輸出格式：`mp4`
+- 預設位元率：`2M`
+- 預設切片長度：`10` 秒
+- Worker 預設每 `2` 秒輪詢一次任務
+- Worker 預設每 `5` 秒回報一次心跳
+
+## API 說明
+
+### Manager API
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| `POST` | `/jobs` | 建立轉檔工作，表單欄位包含 `video`、`resolution`、`format`、`bitrate` |
+| `GET` | `/jobs` | 列出所有工作 |
+| `GET` | `/jobs/:id` | 取得單一工作詳情與片段狀態 |
+| `DELETE` | `/jobs/:id` | 刪除尚未開始處理的排隊工作 |
+| `GET` | `/jobs/:id/download` | 下載已完成的輸出檔 |
+| `GET` | `/nodes` | 列出所有 Worker 節點與資源使用狀態 |
+| `POST` | `/nodes/register` | Worker 啟動時註冊節點 |
+| `POST` | `/nodes/:name/heartbeat` | Worker 回報心跳與系統資源資訊 |
+| `GET` | `/workers/:name/task` | Worker 輪詢取得下一個任務 |
+| `POST` | `/workers/:name/task/:id/progress` | 回報任務進度 |
+| `POST` | `/workers/:name/task/:id/complete` | 回報任務完成 |
+| `POST` | `/workers/:name/task/:id/fail` | 回報任務失敗並重新排隊 |
+
+### Worker API
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| `GET` | `/task` | 查詢本機是否忙碌 |
+| `GET` | `/metrics` | 回傳 CPU 與記憶體資訊 |
+
+## 任務流程
+
+1. 上傳影片後，Manager 會先建立工作紀錄。
+2. 工作進入 `splitting` 狀態後，Manager 使用 FFmpeg 產生切片。
+3. 切片完成後，Manager 會把每個片段轉成獨立任務。
+4. Worker 從任務佇列中領取任務並進行編碼。
+5. Worker 會持續回報進度，完成後上報輸出檔位置。
+6. 當所有片段都完成後，Manager 會將片段合併成最終檔案。
+
+## 容錯與健康監控
+
+- Worker 會定期送出心跳與系統資源數據。
+- Manager 超過心跳逾時後會先標記節點為 `suspected`。
+- 若連續多次逾時，節點會被標記為 `offline`。
+- 離線節點正在處理中的任務會被重新排回佇列。
+- Worker 重新啟動並再次註冊後，會自動恢復可派工狀態。
+
+## 環境變數
+
+### Manager
+
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `DATA_DIR` | `/data` | 共用資料目錄 |
+| `SEGMENT_DURATION` | `10` | 每個切片的秒數 |
+| `HEARTBEAT_TIMEOUT` | `15` | 心跳逾時秒數 |
+| `HEARTBEAT_FAILURE_THRESHOLD` | `3` | 判定離線前的連續逾時次數 |
+
+### Worker
+
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `WORKER_NAME` | `worker-1` | Worker 節點名稱 |
+| `MANAGER_URL` | `http://manager:8080` | Manager 位址 |
+| `DATA_DIR` | `/data` | 共用資料目錄 |
+| `POLL_INTERVAL` | `2` | 輪詢任務間隔秒數 |
+| `HEARTBEAT_INTERVAL` | `5` | 心跳間隔秒數 |
+
+## Docker Compose
+
+`docker-compose.yml` 預設會啟動：
+
+- `manager`
+- `worker-1`
+- `worker-2`
+- `worker-3`
+
+如果要擴充 Worker，可以複製現有 Worker 服務區塊，並替每個節點設定不同的 `WORKER_NAME`。
+
+## 資料位置
+
+容器內部資料會寫到 `/data`，包含：
+
+- `/data/uploads`：原始上傳檔
+- `/data/segments`：切片與編碼後的片段
+- `/data/outputs`：最後合併完成的成品
+
+## 注意事項
+
+- 切片與合併都依賴 FFmpeg，容器內已內建安裝。
+- 目前系統是以 Docker Compose 單機環境為主，適合展示、測試或小型部署。
+- 只有狀態為 `queued` 的工作可以刪除。
+
+## 開發補充
+
+Manager 與 Worker 都是 Flask 應用。若你想直接檢查行為，可以分別查看：
+
+- [Manager 入口](/Volumes/Work_Data/Video_Transcoding/manager/app.py)
+- [Worker 入口](/Volumes/Work_Data/Video_Transcoding/worker/app.py)
