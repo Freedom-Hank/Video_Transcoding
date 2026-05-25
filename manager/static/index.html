@@ -138,17 +138,38 @@
       color: var(--muted);
     }
     .metric-row span { color: var(--text); float: right; }
+    .table-wrap {
+      overflow-x: auto;
+      margin: -0.25rem;
+    }
     table {
       width: 100%;
+      min-width: 980px;
       border-collapse: collapse;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
     th, td {
       text-align: left;
-      padding: 0.65rem 0.75rem;
+      padding: 0.55rem 0.6rem;
       border-bottom: 1px solid var(--border);
+      vertical-align: top;
     }
-    th { color: var(--muted); font-weight: 500; font-size: 0.8rem; }
+    th { color: var(--muted); font-weight: 500; font-size: 0.78rem; white-space: nowrap; }
+    td.col-id, td.col-owner { white-space: nowrap; }
+    td.col-file {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    td.col-settings { font-size: 0.8rem; line-height: 1.35; }
+    .owner-chip {
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
     .badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -238,12 +259,41 @@
       display: none;
     }
     .upload-progress.active { display: block; }
+    .owner-bar {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .owner-bar input {
+      width: auto;
+      flex: 0 1 220px;
+      padding: 0.3rem 0.55rem;
+      font-size: 0.85rem;
+    }
+    .owner-bar code { color: var(--text); font-size: 0.78rem; }
+    .owner-chip {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      background: rgba(99, 102, 241, 0.18);
+      color: var(--queued);
+    }
+    .owner-chip.mine { background: rgba(59, 130, 246, 0.2); color: var(--accent); }
   </style>
 </head>
 <body>
   <header>
     <h1>Distributed Video Transcoding</h1>
     <p>Upload videos, monitor parallel segment encoding across worker nodes, and download results.</p>
+    <div class="owner-bar">
+      <label for="ownerName" style="margin:0">Display name:</label>
+      <input type="text" id="ownerName" placeholder="Anonymous" maxlength="64">
+      <span>Owner ID: <code id="ownerIdDisplay"></code></span>
+    </div>
   </header>
 
   <main>
@@ -305,36 +355,71 @@
     <section>
       <h2>Jobs</h2>
       <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>Job ID</th>
-              <th>File</th>
-              <th>Status</th>
-              <th>Progress</th>
-              <th>Settings</th>
-              <th>Tasks</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="jobsBody">
-            <tr><td colspan="7" class="empty">No jobs yet</td></tr>
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Owner</th>
+                <th>File</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Settings</th>
+                <th>Tasks</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobsBody">
+              <tr><td colspan="8" class="empty">No jobs yet</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>
 
   <script>
     const POLL_MS = 3000;
+    const DEFAULT_CHUNK_SIZE = 50 * 1024 * 1024;
 
-    document.getElementById('uploadForm').addEventListener('submit', (e) => {
+    function getOwnerId() {
+      let id = localStorage.getItem('ownerId');
+      if (!id) {
+        id = (crypto.randomUUID ? crypto.randomUUID()
+          : 'xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx'.replace(/[xy]/g, c => {
+              const r = Math.random() * 16 | 0;
+              return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            }));
+        localStorage.setItem('ownerId', id);
+      }
+      return id;
+    }
+    function getOwnerName() {
+      return (localStorage.getItem('ownerName') || '').trim();
+    }
+    const OWNER_ID = getOwnerId();
+    document.getElementById('ownerIdDisplay').textContent = OWNER_ID.slice(0, 8) + '…';
+    const ownerNameInput = document.getElementById('ownerName');
+    ownerNameInput.value = getOwnerName();
+    ownerNameInput.addEventListener('input', () => {
+      localStorage.setItem('ownerName', ownerNameInput.value.trim());
+    });
+
+    function authHeaders(extra = {}) {
+      return {
+        ...extra,
+        'X-Owner-Id': OWNER_ID,
+        'X-Owner-Name': getOwnerName(),
+      };
+    }
+
+    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = e.target;
-      const fd = new FormData(form);
       const btn = form.querySelector('button[type="submit"]');
       const fileInput = form.querySelector('#video');
-      const fileName = fileInput.files[0]?.name || '';
+      const file = fileInput.files[0];
+      if (!file) return;
 
       const progressBox = document.getElementById('uploadProgress');
       const fillEl = document.getElementById('uploadFill');
@@ -343,49 +428,92 @@
 
       btn.disabled = true;
       btn.textContent = 'Uploading…';
-      nameEl.textContent = fileName ? `· ${fileName}` : '';
+      nameEl.textContent = `· ${file.name}`;
       fillEl.style.width = '0%';
       pctEl.textContent = '0%';
       progressBox.classList.add('active');
 
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/jobs');
-
-      xhr.upload.addEventListener('progress', (evt) => {
-        if (!evt.lengthComputable) return;
-        const pct = Math.round((evt.loaded / evt.total) * 100);
+      const setPct = (pct) => {
         fillEl.style.width = pct + '%';
         pctEl.textContent = pct + '%';
-      });
+      };
 
-      const cleanup = () => {
+      try {
+        const meta = {
+          filename: file.name,
+          total_size: file.size,
+          resolution: form.resolution.value,
+          format: form.format.value,
+          bitrate: form.bitrate.value,
+        };
+        const initRes = await fetch('/jobs/upload-init', {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify(meta),
+        });
+        if (!initRes.ok) {
+          const err = await initRes.json().catch(() => ({}));
+          throw new Error(err.error || `upload-init failed (${initRes.status})`);
+        }
+        const { job_id, chunk_size } = await initRes.json();
+        const cs = Math.max(1, Number(chunk_size) || DEFAULT_CHUNK_SIZE);
+        const total = file.size;
+        const totalChunks = Math.ceil(total / cs);
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * cs;
+          const end = Math.min(start + cs, total);
+          const blob = file.slice(start, end);
+          await uploadChunkXhr(job_id, i, blob, (loaded) => {
+            const overall = Math.round(((start + loaded) / total) * 100);
+            setPct(Math.min(99, overall));
+          });
+        }
+
+        const finalRes = await fetch(`/jobs/${job_id}/upload-complete`, {
+          method: 'POST',
+          headers: authHeaders(),
+        });
+        if (!finalRes.ok) {
+          const err = await finalRes.json().catch(() => ({}));
+          throw new Error(err.error || 'Finalize failed');
+        }
+        setPct(100);
+        form.reset();
+        await refresh();
+      } catch (err) {
+        alert('Upload failed: ' + err.message);
+      } finally {
         btn.disabled = false;
         btn.textContent = 'Submit Job';
         setTimeout(() => progressBox.classList.remove('active'), 600);
-      };
-
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          fillEl.style.width = '100%';
-          pctEl.textContent = '100%';
-          form.reset();
-          refresh();
-        } else {
-          let msg = 'Upload failed';
-          try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) {}
-          alert(msg);
-        }
-        cleanup();
-      });
-
-      xhr.addEventListener('error', () => {
-        alert('Upload failed: network error');
-        cleanup();
-      });
-      xhr.addEventListener('abort', cleanup);
-
-      xhr.send(fd);
+      }
     });
+
+    function uploadChunkXhr(jobId, index, blob, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/jobs/${jobId}/chunks/${index}`);
+        xhr.setRequestHeader('X-Owner-Id', OWNER_ID);
+        xhr.setRequestHeader('X-Owner-Name', getOwnerName());
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.addEventListener('progress', (evt) => {
+          if (evt.lengthComputable) onProgress(evt.loaded);
+        });
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            let msg = `chunk ${index} failed (${xhr.status})`;
+            try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) {}
+            reject(new Error(msg));
+          }
+        });
+        xhr.addEventListener('error', () => reject(new Error(`chunk ${index} network error`)));
+        xhr.addEventListener('abort', () => reject(new Error(`chunk ${index} aborted`)));
+        xhr.send(blob);
+      });
+    }
 
     async function refresh() {
       await Promise.all([loadNodes(), loadJobs()]);
@@ -533,7 +661,7 @@
         const listRes = await fetch('/jobs');
         const jobs = await listRes.json();
         if (!jobs.length) {
-          tbody.innerHTML = '<tr><td colspan="7" class="empty">No jobs yet</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="8" class="empty">No jobs yet</td></tr>';
           return;
         }
 
@@ -555,8 +683,9 @@
             : (job.status === 'splitting' ? 'Planning time ranges…' : '—');
 
           const { label, badge } = displayStatus(job);
+          const isMine = job.owner_id && job.owner_id === OWNER_ID;
           let actions = '—';
-          if (job.status === 'queued') {
+          if (isMine && (job.status === 'queued' || job.status === 'uploading')) {
             actions = `<button class="danger" data-delete-job="${escapeHtml(job.job_id)}">Delete</button>`;
           } else if (job.status === 'completed' && job.output_path && !job.error) {
             actions = `<a class="download" href="/jobs/${escapeHtml(job.job_id)}/download">Download</a>`;
@@ -564,13 +693,19 @@
             actions = `<span style="color:var(--danger);font-size:0.8rem">${escapeHtml(job.error)}</span>`;
           }
 
+          const ownerLabel = job.owner_name || (job.owner_id ? job.owner_id.slice(0, 8) + '…' : '—');
+          const ownerHtml = job.owner_id
+            ? `<span class="owner-chip ${isMine ? 'mine' : ''}">${escapeHtml(ownerLabel)}${isMine ? ' (you)' : ''}</span>`
+            : '<span class="owner-chip">—</span>';
+
           return `
             <tr>
-              <td><code>${escapeHtml(job.job_id)}</code></td>
-              <td>${escapeHtml(job.filename)}</td>
+              <td class="col-id"><code>${escapeHtml(job.job_id)}</code></td>
+              <td class="col-owner">${ownerHtml}</td>
+              <td class="col-file" title="${escapeHtml(job.filename)}">${escapeHtml(job.filename)}</td>
               <td><span class="badge badge-${escapeHtml(badge)}">${escapeHtml(label)}</span></td>
               <td>${progressHtml}</td>
-              <td>${escapeHtml(job.resolution)} · ${escapeHtml(job.format)} · ${escapeHtml(job.bitrate)}<br>${Number(job.segment_count || 0)} segments / ${Number(job.task_count || 0)} batches</td>
+              <td class="col-settings">${escapeHtml(job.resolution)} · ${escapeHtml(job.format)} · ${escapeHtml(job.bitrate)}<br>${Number(job.segment_count || 0)} segments / ${Number(job.task_count || 0)} batches</td>
               <td>${taskHtml}</td>
               <td>${actions}</td>
             </tr>
@@ -587,9 +722,12 @@
 
     async function deleteJob(jobId) {
       if (!confirm('Delete this queued job?')) return;
-      const res = await fetch(`/jobs/${jobId}`, { method: 'DELETE' });
+      const res = await fetch(`/jobs/${jobId}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
         alert(err.error || 'Delete failed');
         return;
       }

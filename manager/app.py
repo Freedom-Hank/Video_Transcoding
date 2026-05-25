@@ -29,7 +29,11 @@ HEARTBEAT_FAILURE_THRESHOLD = int(
 )
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "3600"))
 MAX_TASK_RETRIES = int(os.environ.get("MAX_TASK_RETRIES", "3"))
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "1"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "2048"))
+MAX_UPLOADS_TOTAL_MB = int(os.environ.get("MAX_UPLOADS_TOTAL_MB", "10240"))
+UPLOAD_CHUNK_SIZE_MB = int(os.environ.get("UPLOAD_CHUNK_SIZE_MB", "50"))
+CHUNK_SIZE_BYTES = UPLOAD_CHUNK_SIZE_MB * 1024 * 1024
 STATE_PATH = os.environ.get("STATE_PATH", os.path.join(DATA_DIR, "manager_state.json"))
 
 ALLOWED_RESOLUTIONS = {"1920x1080", "1280x720", "854x480", "640x360"}
@@ -54,6 +58,7 @@ scheduler = Scheduler(
     max_task_retries=MAX_TASK_RETRIES,
     task_timeout_seconds=TASK_TIMEOUT_SECONDS,
     task_batch_size=TASK_BATCH_SIZE,
+    max_concurrent_jobs=MAX_CONCURRENT_JOBS,
 )
 health_monitor = HealthMonitor(
     scheduler,
@@ -80,10 +85,43 @@ def process_job_queue():
                 ).start()
 
             scheduler.requeue_timed_out_tasks()
+            _cleanup_finished_uploads()
         except Exception as exc:
             app.logger.error("Job queue error: %s", exc)
 
         time.sleep(2)
+
+
+def _uploads_dir_bytes() -> int:
+    total = 0
+    try:
+        for entry in Path(UPLOADS_DIR).iterdir():
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _cleanup_finished_uploads():
+    for job_id, input_path in scheduler.list_finished_jobs_with_inputs():
+        try:
+            if input_path and os.path.isfile(input_path):
+                os.remove(input_path)
+        except OSError as exc:
+            app.logger.warning("Failed to remove upload for %s: %s", job_id, exc)
+        scheduler.clear_input_path(job_id)
+
+
+def _remove_job_files(job_id: str):
+    for f in Path(UPLOADS_DIR).glob(f"{job_id}_*"):
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _process_new_job(job_id: str):
@@ -146,42 +184,167 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
-@app.route("/jobs", methods=["POST"])
-def create_job():
-    if "video" not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
+@app.route("/jobs/upload-init", methods=["POST"])
+def upload_init():
+    owner_id = request.headers.get("X-Owner-Id", "").strip()
+    if not owner_id:
+        return jsonify({"error": "X-Owner-Id header required"}), 400
+    owner_name = request.headers.get("X-Owner-Name", "").strip()[:64]
 
-    video = request.files["video"]
-    if not video.filename:
-        return jsonify({"error": "Empty filename"}), 400
+    data = request.get_json(silent=True) or {}
+    filename_raw = data.get("filename") or ""
+    try:
+        total_size = int(data.get("total_size") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid total_size"}), 400
+    if total_size <= 0:
+        return jsonify({"error": "Invalid total_size"}), 400
+    if total_size > MAX_UPLOAD_MB * 1024 * 1024:
+        return jsonify(
+            {"error": f"File exceeds per-file limit {MAX_UPLOAD_MB} MB"}
+        ), 413
 
-    filename = secure_filename(video.filename)
-    if not filename:
-        return jsonify({"error": "Invalid filename"}), 400
-    if Path(filename).suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS:
-        return jsonify({"error": "Unsupported video file extension"}), 400
+    filename = secure_filename(filename_raw)
+    if not filename or Path(filename).suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS:
+        return jsonify({"error": "Invalid filename or unsupported extension"}), 400
 
-    resolution = request.form.get("resolution", "1280x720")
-    output_format = request.form.get("format", "mp4").lower().lstrip(".")
-    bitrate = request.form.get("bitrate", "2M")
+    resolution = data.get("resolution", "1280x720")
+    output_format = (data.get("format") or "mp4").lower().lstrip(".")
+    bitrate = data.get("bitrate", "2M")
     validation_error = _validate_job_options(resolution, output_format, bitrate)
     if validation_error:
         return jsonify({"error": validation_error}), 400
 
+    limit_bytes = MAX_UPLOADS_TOTAL_MB * 1024 * 1024
+    on_disk = _uploads_dir_bytes()
+    pending = scheduler.get_pending_upload_bytes()
+    if on_disk + pending + total_size > limit_bytes:
+        free_mb = max(0, (limit_bytes - on_disk - pending) // (1024 * 1024))
+        return jsonify(
+            {
+                "error": (
+                    f"Uploads storage limit exceeded "
+                    f"(limit {MAX_UPLOADS_TOTAL_MB} MB, free ~{free_mb} MB). "
+                    f"Try again later or delete pending jobs."
+                )
+            }
+        ), 507
+
     job = scheduler.create_job(
-        filename, "", resolution, output_format, bitrate
+        filename,
+        "",
+        resolution,
+        output_format,
+        bitrate,
+        owner_id=owner_id,
+        owner_name=owner_name,
+        total_size_bytes=total_size,
     )
-    job_id = job["job_id"]
-    upload_path = os.path.join(UPLOADS_DIR, f"{job_id}_{filename}")
+    return jsonify(
+        {
+            "job_id": job["job_id"],
+            "chunk_size": CHUNK_SIZE_BYTES,
+        }
+    ), 201
+
+
+@app.route("/jobs/<job_id>/chunks/<int:index>", methods=["POST"])
+def upload_chunk(job_id, index):
+    owner_id = request.headers.get("X-Owner-Id", "").strip()
+    if not owner_id:
+        return jsonify({"error": "X-Owner-Id header required"}), 400
+
+    content_length = request.content_length or 0
+    if content_length > CHUNK_SIZE_BYTES * 2:
+        return jsonify({"error": "Chunk too large"}), 413
+
+    with scheduler.lock:
+        job = scheduler.jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("owner_id") != owner_id:
+            return jsonify({"error": "Forbidden"}), 403
+        if job["status"] != "uploading":
+            return jsonify({"error": "Job not in uploading state"}), 409
+        expected = job.get("next_chunk_index", 0)
+        if index != expected:
+            return jsonify({"error": f"Expected chunk index {expected}"}), 409
+        filename = job["filename"]
+        total_size = job.get("total_size_bytes", 0)
+        uploaded = job.get("uploaded_bytes", 0)
+
+    data = request.get_data(cache=False)
+    if not data:
+        return jsonify({"error": "Empty chunk"}), 400
+    if uploaded + len(data) > total_size:
+        return jsonify({"error": "Chunk exceeds declared total size"}), 400
+
+    part_path = os.path.join(UPLOADS_DIR, f"{job_id}_{filename}.part")
     try:
-        video.save(upload_path)
+        with open(part_path, "ab") as f:
+            f.write(data)
     except OSError as exc:
-        scheduler.fail_job(job_id, f"Upload failed: {exc}")
-        return jsonify({"error": "Upload failed"}), 500
+        scheduler.fail_job(job_id, f"Chunk write failed: {exc}")
+        return jsonify({"error": "Chunk write failed"}), 500
 
-    scheduler.set_job_input_path(job_id, upload_path)
+    ok, msg, code = scheduler.record_chunk(job_id, index, len(data), owner_id)
+    if not ok:
+        return jsonify({"error": msg}), code
+    return jsonify({"status": "ok", "received": len(data)}), 200
 
-    return jsonify(scheduler.get_job(job["job_id"])), 201
+
+@app.route("/jobs/<job_id>/upload-complete", methods=["POST"])
+def upload_complete(job_id):
+    owner_id = request.headers.get("X-Owner-Id", "").strip()
+    if not owner_id:
+        return jsonify({"error": "X-Owner-Id header required"}), 400
+
+    with scheduler.lock:
+        job = scheduler.jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("owner_id") != owner_id:
+            return jsonify({"error": "Forbidden"}), 403
+        if job["status"] != "uploading":
+            return jsonify({"error": "Job not in uploading state"}), 409
+        expected_total = job.get("total_size_bytes") or 0
+        uploaded = job.get("uploaded_bytes") or 0
+        filename = job["filename"]
+
+    if uploaded != expected_total:
+        return jsonify(
+            {"error": f"Incomplete upload: {uploaded}/{expected_total} bytes"}
+        ), 400
+
+    part_path = os.path.join(UPLOADS_DIR, f"{job_id}_{filename}.part")
+    final_path = os.path.join(UPLOADS_DIR, f"{job_id}_{filename}")
+    try:
+        os.replace(part_path, final_path)
+    except OSError as exc:
+        scheduler.fail_job(job_id, f"Finalize failed: {exc}")
+        return jsonify({"error": "Finalize failed"}), 500
+
+    scheduler.set_job_input_path(job_id, final_path)
+    return jsonify(scheduler.get_job(job_id)), 200
+
+
+@app.route("/jobs/<job_id>/upload-status", methods=["GET"])
+def upload_status(job_id):
+    owner_id = request.headers.get("X-Owner-Id", "").strip()
+    with scheduler.lock:
+        job = scheduler.jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("owner_id") != owner_id:
+            return jsonify({"error": "Forbidden"}), 403
+        return jsonify(
+            {
+                "status": job["status"],
+                "next_chunk_index": job.get("next_chunk_index", 0),
+                "uploaded_bytes": job.get("uploaded_bytes", 0),
+                "total_size_bytes": job.get("total_size_bytes", 0),
+            }
+        )
 
 
 @app.route("/jobs", methods=["GET"])
@@ -199,16 +362,22 @@ def get_job(job_id):
 
 @app.route("/jobs/<job_id>", methods=["DELETE"])
 def delete_job(job_id):
-    ok, message = scheduler.delete_job(job_id)
+    owner_id = request.headers.get("X-Owner-Id", "").strip()
+    if not owner_id:
+        return jsonify({"error": "X-Owner-Id header required"}), 400
+
+    ok, message = scheduler.delete_job(job_id, owner_id=owner_id)
     if not ok:
-        return jsonify({"error": message}), 400
+        code = 403 if "authorized" in message.lower() else 400
+        if "not found" in message.lower():
+            code = 404
+        return jsonify({"error": message}), code
 
     job_dir = os.path.join(SEGMENTS_DIR, job_id)
     if os.path.isdir(job_dir):
         shutil.rmtree(job_dir, ignore_errors=True)
 
-    for f in Path(UPLOADS_DIR).glob(f"{job_id}_*"):
-        f.unlink(missing_ok=True)
+    _remove_job_files(job_id)
 
     return jsonify({"message": message})
 
@@ -307,7 +476,9 @@ def _validate_job_options(resolution: str, output_format: str, bitrate: str) -> 
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(_exc):
-    return jsonify({"error": f"Uploaded file is larger than {MAX_UPLOAD_MB} MB"}), 413
+    return jsonify(
+        {"error": f"Request body too large (chunk limit ~{UPLOAD_CHUNK_SIZE_MB * 2} MB)"}
+    ), 413
 
 
 if __name__ == "__main__":

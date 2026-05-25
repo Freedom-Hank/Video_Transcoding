@@ -54,9 +54,28 @@ if errorlevel 1 (
     pause
     goto :menu
 )
+
 echo.
-echo Opening browser...
-start "" "http://localhost:8080"
+echo Checking for cloudflared...
+where cloudflared >nul 2>nul
+if errorlevel 1 (
+    echo cloudflared is not installed or not in PATH. Skipping TryCloudflare step.
+    echo To install:  winget install Cloudflare.cloudflared
+    pause
+    goto :menu
+)
+
+set "CF_LOG=%ROOT%cloudflared.log"
+if exist "%CF_LOG%" del /f /q "%CF_LOG%" >nul 2>nul
+
+echo.
+echo Starting Cloudflare Tunnel in a new window...
+start "Cloudflare Tunnel" powershell -NoExit -Command "& cloudflared tunnel --url http://localhost:8080 2>&1 | ForEach-Object { Add-Content -Path '%CF_LOG%' -Value $_; Write-Host $_ }"
+
+echo.
+echo Waiting for TryCloudflare URL (up to 60 seconds)...
+powershell -NoProfile -Command "$log='%CF_LOG%'; $url=$null; for ($i=0; $i -lt 60; $i++) { if (Test-Path $log) { $m = Select-String -Path $log -Pattern 'https://[a-z0-9.-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($m) { $url = $m.Matches[0].Value; break } } Start-Sleep -Seconds 1 }; if ($url) { Write-Host ''; Write-Host ('TryCloudflare URL: ' + $url) -ForegroundColor Green} else { Write-Host 'Could not detect TryCloudflare URL within 60s. Please check the Cloudflare Tunnel window.' -ForegroundColor Yellow }"
+
 pause
 goto :menu
 

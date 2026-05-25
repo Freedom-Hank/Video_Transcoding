@@ -17,6 +17,7 @@ class Scheduler:
         max_task_retries: int = 3,
         task_timeout_seconds: int = 3600,
         task_batch_size: int = 5,
+        max_concurrent_jobs: int = 1,
     ):
         self.lock = threading.Lock()
         self.jobs: dict[str, dict] = {}
@@ -27,6 +28,7 @@ class Scheduler:
         self.max_task_retries = max_task_retries
         self.task_timeout_seconds = task_timeout_seconds
         self.task_batch_size = max(1, task_batch_size)
+        self.max_concurrent_jobs = max(1, max_concurrent_jobs)
         self._load_state()
 
     def register_worker(self, name: str) -> dict:
@@ -171,6 +173,9 @@ class Scheduler:
         resolution: str,
         output_format: str,
         bitrate: str,
+        owner_id: str | None = None,
+        owner_name: str | None = None,
+        total_size_bytes: int | None = None,
     ) -> dict:
         job_id = str(uuid.uuid4())[:8]
         with self.lock:
@@ -191,10 +196,62 @@ class Scheduler:
                 "task_batch_size": self.task_batch_size,
                 "split_metadata": {},
                 "error": None,
+                "owner_id": owner_id,
+                "owner_name": owner_name or "",
+                "total_size_bytes": total_size_bytes or 0,
+                "uploaded_bytes": 0,
+                "next_chunk_index": 0,
             }
             self.jobs[job_id] = job
             self._persist_locked()
         return job
+
+    def record_chunk(
+        self, job_id: str, chunk_index: int, chunk_size: int, owner_id: str
+    ) -> tuple[bool, str, int]:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return False, "Job not found", 404
+            if job.get("owner_id") != owner_id:
+                return False, "Forbidden", 403
+            if job["status"] != "uploading":
+                return False, "Job is not in uploading state", 409
+            expected = job.get("next_chunk_index", 0)
+            if chunk_index != expected:
+                return False, f"Expected chunk index {expected}", 409
+            job["uploaded_bytes"] = (job.get("uploaded_bytes") or 0) + chunk_size
+            job["next_chunk_index"] = chunk_index + 1
+            self._persist_locked()
+            return True, "", 200
+
+    def get_pending_upload_bytes(self) -> int:
+        with self.lock:
+            return sum(
+                max(
+                    0,
+                    (j.get("total_size_bytes") or 0)
+                    - (j.get("uploaded_bytes") or 0),
+                )
+                for j in self.jobs.values()
+                if j.get("status") == "uploading"
+            )
+
+    def list_finished_jobs_with_inputs(self) -> list[tuple[str, str]]:
+        with self.lock:
+            return [
+                (j["job_id"], j["input_path"])
+                for j in self.jobs.values()
+                if j.get("status") in ("completed", "failed")
+                and j.get("input_path")
+            ]
+
+    def clear_input_path(self, job_id: str):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job:
+                job["input_path"] = None
+                self._persist_locked()
 
     def set_job_input_path(self, job_id: str, input_path: str):
         with self.lock:
@@ -208,11 +265,25 @@ class Scheduler:
 
     def claim_jobs_for_split(self) -> list[str]:
         with self.lock:
+            active = sum(
+                1
+                for j in self.jobs.values()
+                if j["status"] in ("splitting", "running", "merging")
+            )
+            slots = max(0, self.max_concurrent_jobs - active)
+            if slots <= 0:
+                return []
             claimed = []
-            for job_id, job in self.jobs.items():
-                if job["status"] == "queued" and job.get("input_path"):
-                    job["status"] = "splitting"
-                    claimed.append(job_id)
+            # FIFO by created_at so the oldest queued job runs first
+            queued = sorted(
+                (j for j in self.jobs.values() if j["status"] == "queued" and j.get("input_path")),
+                key=lambda j: j.get("created_at") or "",
+            )
+            for job in queued:
+                if len(claimed) >= slots:
+                    break
+                job["status"] = "splitting"
+                claimed.append(job["job_id"])
             if claimed:
                 self._persist_locked()
             return claimed
@@ -328,11 +399,15 @@ class Scheduler:
             job["finished_at"] = _now_iso()
             self._persist_locked()
 
-    def delete_job(self, job_id: str) -> tuple[bool, str]:
+    def delete_job(
+        self, job_id: str, owner_id: str | None = None
+    ) -> tuple[bool, str]:
         with self.lock:
             job = self.jobs.get(job_id)
             if not job:
                 return False, "Job not found"
+            if owner_id is not None and job.get("owner_id") != owner_id:
+                return False, "Not authorized to delete this job"
             if job["status"] not in ("uploading", "queued"):
                 return False, "Only queued jobs can be deleted"
             for task_id in job["task_ids"]:
@@ -564,6 +639,10 @@ class Scheduler:
             "task_batch_size": job.get("task_batch_size", 1),
             "split_metadata": job.get("split_metadata", {}),
             "error": job.get("error"),
+            "owner_id": job.get("owner_id"),
+            "owner_name": job.get("owner_name", ""),
+            "total_size_bytes": job.get("total_size_bytes", 0),
+            "uploaded_bytes": job.get("uploaded_bytes", 0),
         }
 
     def _job_detail(self, job: dict) -> dict:
