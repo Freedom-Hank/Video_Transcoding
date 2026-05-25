@@ -290,6 +290,16 @@
       await Promise.all([loadNodes(), loadJobs()]);
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    }
+
     async function loadNodes() {
       const grid = document.getElementById('nodesGrid');
       try {
@@ -300,11 +310,11 @@
           return;
         }
         grid.innerHTML = nodes.map(n => `
-          <div class="node-card status-${n.status}">
+          <div class="node-card status-${escapeHtml(n.status)}">
             <div class="node-header">
-              <span class="node-name">${n.name}</span>
+              <span class="node-name">${escapeHtml(n.name)}</span>
               <span class="status-label">
-                <span class="status-dot"></span>${n.status}
+                <span class="status-dot"></span>${escapeHtml(n.status)}
               </span>
             </div>
             <div class="metric-row">
@@ -315,7 +325,7 @@
               Memory <span>${n.memory_used_mb.toFixed(0)} / ${n.memory_total_mb.toFixed(0)} MiB (${n.memory_percent.toFixed(1)}%)</span>
               <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, n.memory_percent)}%"></div></div>
             </div>
-            ${n.current_task_id ? `<div class="metric-row">Task: <span>${n.current_task_id}</span></div>` : ''}
+            ${n.current_task_id ? `<div class="metric-row">Task: <span>${escapeHtml(n.current_task_id)}</span></div>` : ''}
           </div>
         `).join('');
       } catch (err) {
@@ -324,11 +334,19 @@
     }
 
     function displayStatus(job) {
-      if (job.error) return { label: 'failed', badge: 'failed' };
+      if (job.status === 'failed' || job.error) return { label: 'failed', badge: 'failed' };
       if (job.status === 'splitting' || job.status === 'merging') {
         return { label: job.status, badge: 'running' };
       }
       return { label: job.status, badge: job.status };
+    }
+
+    function jobProgress(job, tasks) {
+      if (job.status === 'completed' && !job.error) return 100;
+      if (job.status === 'failed') return 0;
+      if (!tasks.length) return job.status === 'queued' ? 0 : '—';
+      const total = tasks.reduce((sum, task) => sum + Number(task.progress || 0), 0);
+      return Math.round(total / tasks.length);
     }
 
     async function loadJobs() {
@@ -343,41 +361,47 @@
 
         tbody.innerHTML = jobs.map(job => {
           const tasks = job.tasks || [];
-          const progress = tasks.length
-            ? Math.round(100 * tasks.filter(t => t.status === 'completed').length / tasks.length)
-            : (job.status === 'queued' ? 0 : (job.status === 'completed' ? 100 : '—'));
+          const progress = jobProgress(job, tasks);
 
           const taskHtml = tasks.length
             ? `<ul class="task-list">${tasks.map(t => {
-                const worker = t.assigned_worker ? ` → ${t.assigned_worker}` : '';
+                const worker = t.assigned_worker ? ` → ${escapeHtml(t.assigned_worker)}` : '';
                 const cls = t.status === 'running' ? 'task-running' : '';
                 const prog = t.status === 'running' ? ` <span class="progress-mini">${t.progress}%</span>` : '';
-                return `<li class="${cls}">Segment ${t.segment_index + 1}: ${t.status}${worker}${prog}</li>`;
+                const attempts = t.attempts ? ` · retry ${t.attempts}` : '';
+                const first = Number(t.segment_index || 0) + 1;
+                const last = first + Number(t.segment_count || 1) - 1;
+                const range = first === last ? `${first}` : `${first}-${last}`;
+                return `<li class="${cls}">Batch ${Number(t.batch_index || 0) + 1} (segments ${range}): ${escapeHtml(t.status)}${worker}${attempts}${prog}</li>`;
               }).join('')}</ul>`
-            : (job.status === 'splitting' ? 'Splitting video…' : '—');
+            : (job.status === 'splitting' ? 'Planning time ranges…' : '—');
 
           const { label, badge } = displayStatus(job);
           let actions = '—';
           if (job.status === 'queued') {
-            actions = `<button class="danger" onclick="deleteJob('${job.job_id}')">Delete</button>`;
+            actions = `<button class="danger" data-delete-job="${escapeHtml(job.job_id)}">Delete</button>`;
           } else if (job.status === 'completed' && job.output_path && !job.error) {
-            actions = `<a class="download" href="/jobs/${job.job_id}/download">Download</a>`;
+            actions = `<a class="download" href="/jobs/${escapeHtml(job.job_id)}/download">Download</a>`;
           } else if (job.error) {
-            actions = `<span style="color:var(--danger);font-size:0.8rem">${job.error}</span>`;
+            actions = `<span style="color:var(--danger);font-size:0.8rem">${escapeHtml(job.error)}</span>`;
           }
 
           return `
             <tr>
-              <td><code>${job.job_id}</code></td>
-              <td>${job.filename}</td>
-              <td><span class="badge badge-${badge}">${label}</span></td>
+              <td><code>${escapeHtml(job.job_id)}</code></td>
+              <td>${escapeHtml(job.filename)}</td>
+              <td><span class="badge badge-${escapeHtml(badge)}">${escapeHtml(label)}</span></td>
               <td>${typeof progress === 'number' ? progress + '%' : progress}</td>
-              <td>${job.resolution} · ${job.format} · ${job.bitrate}</td>
+              <td>${escapeHtml(job.resolution)} · ${escapeHtml(job.format)} · ${escapeHtml(job.bitrate)}<br>${Number(job.segment_count || 0)} segments / ${Number(job.task_count || 0)} batches</td>
               <td>${taskHtml}</td>
               <td>${actions}</td>
             </tr>
           `;
         }).join('');
+
+        tbody.querySelectorAll('[data-delete-job]').forEach(btn => {
+          btn.addEventListener('click', () => deleteJob(btn.dataset.deleteJob));
+        });
       } catch (err) {
         tbody.innerHTML = '<tr><td colspan="7" class="empty">Failed to load jobs</td></tr>';
       }

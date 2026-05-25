@@ -1,0 +1,89 @@
+services:
+  manager:
+    build: ./manager
+    container_name: manager
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./shared-volume:/data
+    environment:
+      DATA_DIR: /data
+      HEARTBEAT_TIMEOUT: "15"
+      HEARTBEAT_FAILURE_THRESHOLD: "3"
+      SEGMENT_DURATION: "10"
+      MAX_SEGMENTS: "90"
+      TASK_BATCH_SIZE: "5"
+      TASK_TIMEOUT_SECONDS: "3600"
+      MAX_TASK_RETRIES: "3"
+      MAX_UPLOAD_MB: "2048"
+      STATE_PATH: /data/manager_state.json
+    networks:
+      - transcoding-net
+    depends_on:
+      - worker-1
+      - worker-2
+      - worker-3
+
+  worker-1:
+    build: ./worker
+    container_name: worker-1
+    hostname: worker-1
+    gpus: all
+    volumes:
+      - ./shared-volume:/data
+    environment:
+      WORKER_NAME: worker-1
+      MANAGER_URL: http://manager:8080
+      DATA_DIR: /data
+      POLL_INTERVAL: "2"
+      HEARTBEAT_INTERVAL: "5"
+      VIDEO_ENCODER: auto
+      FFMPEG_THREADS: "2"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    networks:
+      - transcoding-net
+
+  worker-2:
+    build: ./worker
+    container_name: worker-2
+    hostname: worker-2
+    gpus: all
+    volumes:
+      - ./shared-volume:/data
+    environment:
+      WORKER_NAME: worker-2
+      MANAGER_URL: http://manager:8080
+      DATA_DIR: /data
+      POLL_INTERVAL: "2"
+      HEARTBEAT_INTERVAL: "5"
+      VIDEO_ENCODER: auto
+      FFMPEG_THREADS: "2"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    networks:
+      - transcoding-net
+
+  worker-3:
+    build: ./worker
+    container_name: worker-3
+    hostname: worker-3
+    gpus: all
+    volumes:
+      - ./shared-volume:/data
+    environment:
+      WORKER_NAME: worker-3
+      MANAGER_URL: http://manager:8080
+      DATA_DIR: /data
+      POLL_INTERVAL: "2"
+      HEARTBEAT_INTERVAL: "5"
+      VIDEO_ENCODER: auto
+      FFMPEG_THREADS: "2"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    networks:
+      - transcoding-net
+
+networks:
+  transcoding-net:
+    driver: bridge
