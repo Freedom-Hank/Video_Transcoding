@@ -1,15 +1,18 @@
 import os
+import re
 import shutil
 import threading
 import time
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
 
 from health_monitor import HealthMonitor
 from merger import merge_segments
 from scheduler import Scheduler
-from splitter import split_video
+from splitter import plan_video_segments
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -18,15 +21,40 @@ UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 SEGMENTS_DIR = os.path.join(DATA_DIR, "segments")
 OUTPUTS_DIR = os.path.join(DATA_DIR, "outputs")
 SEGMENT_DURATION = int(os.environ.get("SEGMENT_DURATION", "10"))
+MAX_SEGMENTS = int(os.environ.get("MAX_SEGMENTS", "90"))
+TASK_BATCH_SIZE = int(os.environ.get("TASK_BATCH_SIZE", "5"))
 HEARTBEAT_TIMEOUT = int(os.environ.get("HEARTBEAT_TIMEOUT", "15"))
 HEARTBEAT_FAILURE_THRESHOLD = int(
     os.environ.get("HEARTBEAT_FAILURE_THRESHOLD", "3")
 )
+TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "3600"))
+MAX_TASK_RETRIES = int(os.environ.get("MAX_TASK_RETRIES", "3"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "2048"))
+STATE_PATH = os.environ.get("STATE_PATH", os.path.join(DATA_DIR, "manager_state.json"))
+
+ALLOWED_RESOLUTIONS = {"1920x1080", "1280x720", "854x480", "640x360"}
+ALLOWED_FORMATS = {"mp4", "webm", "mkv"}
+ALLOWED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".m4v",
+}
+BITRATE_RE = re.compile(r"^[1-9]\d{0,2}[kKmM]$")
+
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 for d in (UPLOADS_DIR, SEGMENTS_DIR, OUTPUTS_DIR):
     os.makedirs(d, exist_ok=True)
 
-scheduler = Scheduler()
+scheduler = Scheduler(
+    state_path=STATE_PATH,
+    max_task_retries=MAX_TASK_RETRIES,
+    task_timeout_seconds=TASK_TIMEOUT_SECONDS,
+    task_batch_size=TASK_BATCH_SIZE,
+)
 health_monitor = HealthMonitor(
     scheduler,
     timeout_seconds=HEARTBEAT_TIMEOUT,
@@ -50,6 +78,8 @@ def process_job_queue():
                     args=(job_id,),
                     daemon=True,
                 ).start()
+
+            scheduler.requeue_timed_out_tasks()
         except Exception as exc:
             app.logger.error("Job queue error: %s", exc)
 
@@ -64,14 +94,15 @@ def _process_new_job(job_id: str):
         input_path = job["input_path"]
 
     try:
-        job_segments_dir = os.path.join(SEGMENTS_DIR, job_id, "raw")
-        segment_paths = split_video(
-            input_path, job_segments_dir, SEGMENT_DURATION
+        segments, split_metadata = plan_video_segments(
+            input_path,
+            SEGMENT_DURATION,
+            max_segments=MAX_SEGMENTS,
         )
-        scheduler.start_job_processing(job_id, segment_paths)
+        scheduler.start_job_processing(job_id, segments, split_metadata)
     except (RuntimeError, OSError) as exc:
-        app.logger.error("Split failed for job %s: %s", job_id, exc)
-        scheduler.fail_job(job_id, f"Split failed: {exc}")
+        app.logger.error("Segment planning failed for job %s: %s", job_id, exc)
+        scheduler.fail_job(job_id, f"Segment planning failed: {exc}")
 
 
 def _merge_job(job_id: str):
@@ -79,11 +110,26 @@ def _merge_job(job_id: str):
         job = scheduler.jobs.get(job_id)
         if not job or job["status"] != "merging":
             return
-        tasks = sorted(
-            [scheduler.tasks[tid] for tid in job["task_ids"]],
-            key=lambda t: t["segment_index"],
-        )
-        encoded_paths = [t["output_segment_file"] for t in tasks]
+        encoded_segments = []
+        for task_id in job["task_ids"]:
+            task = scheduler.tasks[task_id]
+            segments = task.get("segments") or [
+                {
+                    "segment_index": task["segment_index"],
+                    "output_segment_file": task.get("output_segment_file"),
+                }
+            ]
+            for segment in segments:
+                encoded_segments.append(
+                    (
+                        segment["segment_index"],
+                        segment["output_segment_file"],
+                    )
+                )
+        encoded_paths = [
+            output_file
+            for _segment_index, output_file in sorted(encoded_segments)
+        ]
         ext = job.get("format", "mp4")
 
     try:
@@ -109,19 +155,31 @@ def create_job():
     if not video.filename:
         return jsonify({"error": "Empty filename"}), 400
 
+    filename = secure_filename(video.filename)
+    if not filename:
+        return jsonify({"error": "Invalid filename"}), 400
+    if Path(filename).suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS:
+        return jsonify({"error": "Unsupported video file extension"}), 400
+
     resolution = request.form.get("resolution", "1280x720")
-    output_format = request.form.get("format", "mp4")
+    output_format = request.form.get("format", "mp4").lower().lstrip(".")
     bitrate = request.form.get("bitrate", "2M")
+    validation_error = _validate_job_options(resolution, output_format, bitrate)
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
 
     job = scheduler.create_job(
-        video.filename, "", resolution, output_format, bitrate
+        filename, "", resolution, output_format, bitrate
     )
     job_id = job["job_id"]
-    upload_path = os.path.join(UPLOADS_DIR, f"{job_id}_{video.filename}")
-    video.save(upload_path)
+    upload_path = os.path.join(UPLOADS_DIR, f"{job_id}_{filename}")
+    try:
+        video.save(upload_path)
+    except OSError as exc:
+        scheduler.fail_job(job_id, f"Upload failed: {exc}")
+        return jsonify({"error": "Upload failed"}), 500
 
-    with scheduler.lock:
-        scheduler.jobs[job_id]["input_path"] = upload_path
+    scheduler.set_job_input_path(job_id, upload_path)
 
     return jsonify(scheduler.get_job(job["job_id"])), 201
 
@@ -217,11 +275,15 @@ def worker_task_progress(name, task_id):
 @app.route("/workers/<name>/task/<task_id>/complete", methods=["POST"])
 def worker_task_complete(name, task_id):
     data = request.get_json(silent=True) or {}
-    output_file = data.get("output_segment_file")
-    if not output_file:
-        return jsonify({"error": "output_segment_file required"}), 400
+    output_files = data.get("output_segment_files")
+    if output_files is None and data.get("output_segment_file"):
+        output_files = [data["output_segment_file"]]
+    if not output_files:
+        return jsonify({"error": "output_segment_files required"}), 400
 
-    job = scheduler.complete_task(task_id, name, output_file)
+    job = scheduler.complete_task(task_id, name, output_files)
+    if job is None:
+        return jsonify({"error": "Task is not assigned to this worker"}), 409
     return jsonify({"status": "ok", "job": job})
 
 
@@ -231,6 +293,21 @@ def worker_task_fail(name, task_id):
     error = data.get("error", "Encode failed")
     scheduler.fail_task(task_id, name, error)
     return jsonify({"status": "ok"})
+
+
+def _validate_job_options(resolution: str, output_format: str, bitrate: str) -> str | None:
+    if resolution not in ALLOWED_RESOLUTIONS:
+        return "Unsupported resolution"
+    if output_format not in ALLOWED_FORMATS:
+        return "Unsupported output format"
+    if not BITRATE_RE.match(bitrate):
+        return "Unsupported bitrate"
+    return None
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(_exc):
+    return jsonify({"error": f"Uploaded file is larger than {MAX_UPLOAD_MB} MB"}), 413
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ def merge_segments(segment_paths: list[str], output_path: str) -> str:
     list_path = output_path + ".list.txt"
     with open(list_path, "w", encoding="utf-8") as f:
         for path in segment_paths:
-            f.write(f"file '{path}'\n")
+            f.write(f"file '{_escape_concat_path(path)}'\n")
 
     cmd = [
         "ffmpeg",
@@ -25,10 +25,17 @@ def merge_segments(segment_paths: list[str], output_path: str) -> str:
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    os.remove(list_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if os.path.exists(list_path):
+            os.remove(list_path)
 
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg merge failed: {result.stderr}")
 
     return output_path
+
+
+def _escape_concat_path(path: str) -> str:
+    return path.replace("'", "'\\''")

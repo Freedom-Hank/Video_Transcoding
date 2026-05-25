@@ -84,8 +84,12 @@ def poll_tasks_loop():
 def _run_task(task: dict):
     task_id = task["task_id"]
     job_id = task["job_id"]
-    segment_index = task["segment_index"]
-    input_path = task["segment_file"]
+    segments = task.get("segments") or [
+        {
+            "segment_index": task["segment_index"],
+            "segment_file": task["segment_file"],
+        }
+    ]
     resolution = task.get("resolution", "1280x720")
     output_format = task.get("format", "mp4")
     bitrate = task.get("bitrate", "2M")
@@ -93,11 +97,11 @@ def _run_task(task: dict):
     output_dir = os.path.join(SEGMENTS_DIR, job_id, "encoded")
     os.makedirs(output_dir, exist_ok=True)
     ext = output_format.lstrip(".")
-    output_path = os.path.join(output_dir, f"seg_{segment_index:03d}.{ext}")
 
     last_sent = {"pct": -1, "at": 0.0}
+    segment_progress = [0 for _ in segments]
 
-    def on_progress(pct):
+    def send_progress(pct):
         now = time.time()
         if (
             pct < 100
@@ -116,18 +120,44 @@ def _run_task(task: dict):
         except requests.RequestException:
             pass
 
+    def progress_callback(segment_offset):
+        def on_progress(pct):
+            segment_progress[segment_offset] = pct
+            overall = round(sum(segment_progress) / len(segment_progress))
+            send_progress(overall)
+
+        return on_progress
+
     try:
-        encode_segment(
-            input_path,
-            output_path,
-            resolution,
-            output_format,
-            bitrate,
-            on_progress=on_progress,
-        )
+        output_files = []
+        for offset, segment in enumerate(segments):
+            segment_index = segment["segment_index"]
+            input_path = segment.get("source_file") or segment["segment_file"]
+            start_time = segment.get("start_time")
+            duration = segment.get("duration")
+            output_path = os.path.join(output_dir, f"seg_{segment_index:03d}.{ext}")
+            encode_segment(
+                input_path,
+                output_path,
+                resolution,
+                output_format,
+                bitrate,
+                start_time=start_time,
+                duration=duration,
+                on_progress=progress_callback(offset),
+            )
+            segment_progress[offset] = 100
+            output_files.append(
+                {
+                    "segment_index": segment_index,
+                    "output_segment_file": output_path,
+                }
+            )
+            send_progress(round(sum(segment_progress) / len(segment_progress)))
+
         requests.post(
             f"{MANAGER_URL}/workers/{WORKER_NAME}/task/{task_id}/complete",
-            json={"output_segment_file": output_path},
+            json={"output_segment_files": output_files},
             timeout=30,
         )
     except Exception as exc:
