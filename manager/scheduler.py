@@ -48,6 +48,12 @@ class Scheduler:
                 "memory_percent": 0.0,
                 "memory_used_mb": 0.0,
                 "memory_total_mb": 0.0,
+                "gpu_available": False,
+                "gpu_percent": 0.0,
+                "gpu_memory_used_mb": 0.0,
+                "gpu_memory_total_mb": 0.0,
+                "gpu_memory_percent": 0.0,
+                "gpu_name": "",
             }
             self._persist_locked()
             return self.nodes[name]
@@ -70,6 +76,14 @@ class Scheduler:
                 node["memory_percent"] = metrics.get("memory_percent", 0.0)
                 node["memory_used_mb"] = metrics.get("memory_used_mb", 0.0)
                 node["memory_total_mb"] = metrics.get("memory_total_mb", 0.0)
+                node["gpu_available"] = bool(metrics.get("gpu_available", False))
+                node["gpu_percent"] = metrics.get("gpu_percent", 0.0)
+                node["gpu_memory_used_mb"] = metrics.get("gpu_memory_used_mb", 0.0)
+                node["gpu_memory_total_mb"] = metrics.get(
+                    "gpu_memory_total_mb", 0.0
+                )
+                node["gpu_memory_percent"] = metrics.get("gpu_memory_percent", 0.0)
+                node["gpu_name"] = metrics.get("gpu_name", "")
             self._persist_locked()
 
     def run_health_check(self, timeout_seconds: int, failure_threshold: int):
@@ -474,6 +488,12 @@ class Scheduler:
                     "memory_percent": n.get("memory_percent", 0.0),
                     "memory_used_mb": n.get("memory_used_mb", 0.0),
                     "memory_total_mb": n.get("memory_total_mb", 0.0),
+                    "gpu_available": n.get("gpu_available", False),
+                    "gpu_percent": n.get("gpu_percent", 0.0),
+                    "gpu_memory_used_mb": n.get("gpu_memory_used_mb", 0.0),
+                    "gpu_memory_total_mb": n.get("gpu_memory_total_mb", 0.0),
+                    "gpu_memory_percent": n.get("gpu_memory_percent", 0.0),
+                    "gpu_name": n.get("gpu_name", ""),
                 }
                 for n in self.nodes.values()
             ]
@@ -489,6 +509,12 @@ class Scheduler:
             "memory_percent": 0.0,
             "memory_used_mb": 0.0,
             "memory_total_mb": 0.0,
+            "gpu_available": False,
+            "gpu_percent": 0.0,
+            "gpu_memory_used_mb": 0.0,
+            "gpu_memory_total_mb": 0.0,
+            "gpu_memory_percent": 0.0,
+            "gpu_name": "",
         }
 
     def _task_payload(self, task: dict) -> dict:

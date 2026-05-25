@@ -181,6 +181,63 @@
       font-size: 0.75rem;
       color: var(--muted);
     }
+    .metric-fill.gpu { background: #10b981; }
+    .metric-fill.gpu-mem { background: #8b5cf6; }
+    .gpu-unavailable {
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-style: italic;
+      margin-top: 0.3rem;
+    }
+    .stage-progress {
+      margin-top: 0.4rem;
+      min-width: 180px;
+    }
+    .stage-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 3px;
+    }
+    .stage-bar {
+      height: 8px;
+      background: var(--bg);
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+    .stage-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+    .stage-fill.upload { background: var(--queued); }
+    .stage-fill.transcode { background: var(--accent); }
+    .stage-fill.merge { background: var(--warning); }
+    .stage-fill.indeterminate {
+      width: 40% !important;
+      animation: indeterminate 1.4s ease-in-out infinite;
+    }
+    @keyframes indeterminate {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+    .duration-pill {
+      display: inline-block;
+      margin-top: 0.3rem;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--success);
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .upload-progress {
+      margin-top: 0.85rem;
+      display: none;
+    }
+    .upload-progress.active { display: block; }
   </style>
 </head>
 <body>
@@ -226,6 +283,15 @@
           </div>
           <button type="submit">Submit Job</button>
         </form>
+        <div class="upload-progress" id="uploadProgress">
+          <div class="stage-label">
+            <span>Uploading <span id="uploadFileName"></span></span>
+            <span id="uploadPercent">0%</span>
+          </div>
+          <div class="stage-bar">
+            <div class="stage-fill upload" id="uploadFill" style="width:0%"></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -262,28 +328,63 @@
   <script>
     const POLL_MS = 3000;
 
-    document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    document.getElementById('uploadForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const form = e.target;
       const fd = new FormData(form);
       const btn = form.querySelector('button[type="submit"]');
+      const fileInput = form.querySelector('#video');
+      const fileName = fileInput.files[0]?.name || '';
+
+      const progressBox = document.getElementById('uploadProgress');
+      const fillEl = document.getElementById('uploadFill');
+      const pctEl = document.getElementById('uploadPercent');
+      const nameEl = document.getElementById('uploadFileName');
+
       btn.disabled = true;
       btn.textContent = 'Uploading…';
-      try {
-        const res = await fetch('/jobs', { method: 'POST', body: fd });
-        if (!res.ok) {
-          const err = await res.json();
-          alert(err.error || 'Upload failed');
-          return;
-        }
-        form.reset();
-        await refresh();
-      } catch (err) {
-        alert('Upload failed: ' + err.message);
-      } finally {
+      nameEl.textContent = fileName ? `· ${fileName}` : '';
+      fillEl.style.width = '0%';
+      pctEl.textContent = '0%';
+      progressBox.classList.add('active');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/jobs');
+
+      xhr.upload.addEventListener('progress', (evt) => {
+        if (!evt.lengthComputable) return;
+        const pct = Math.round((evt.loaded / evt.total) * 100);
+        fillEl.style.width = pct + '%';
+        pctEl.textContent = pct + '%';
+      });
+
+      const cleanup = () => {
         btn.disabled = false;
         btn.textContent = 'Submit Job';
-      }
+        setTimeout(() => progressBox.classList.remove('active'), 600);
+      };
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          fillEl.style.width = '100%';
+          pctEl.textContent = '100%';
+          form.reset();
+          refresh();
+        } else {
+          let msg = 'Upload failed';
+          try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) {}
+          alert(msg);
+        }
+        cleanup();
+      });
+
+      xhr.addEventListener('error', () => {
+        alert('Upload failed: network error');
+        cleanup();
+      });
+      xhr.addEventListener('abort', cleanup);
+
+      xhr.send(fd);
     });
 
     async function refresh() {
@@ -309,7 +410,25 @@
           grid.innerHTML = '<div class="empty">No workers registered</div>';
           return;
         }
-        grid.innerHTML = nodes.map(n => `
+        grid.innerHTML = nodes.map(n => {
+          const gpuPct = Number(n.gpu_percent || 0);
+          const gpuMemUsed = Number(n.gpu_memory_used_mb || 0);
+          const gpuMemTotal = Number(n.gpu_memory_total_mb || 0);
+          const gpuMemPct = Number(n.gpu_memory_percent || 0);
+          const gpuName = n.gpu_name ? ` · ${escapeHtml(n.gpu_name)}` : '';
+          const gpuHtml = n.gpu_available
+            ? `
+              <div class="metric-row">
+                GPU${gpuName} <span>${gpuPct.toFixed(1)}%</span>
+                <div class="metric-bar"><div class="metric-fill gpu" style="width:${Math.min(100, gpuPct)}%"></div></div>
+              </div>
+              <div class="metric-row">
+                GPU Mem <span>${gpuMemUsed.toFixed(0)} / ${gpuMemTotal.toFixed(0)} MiB (${gpuMemPct.toFixed(1)}%)</span>
+                <div class="metric-bar"><div class="metric-fill gpu-mem" style="width:${Math.min(100, gpuMemPct)}%"></div></div>
+              </div>`
+            : '<div class="gpu-unavailable">GPU: not available</div>';
+
+          return `
           <div class="node-card status-${escapeHtml(n.status)}">
             <div class="node-header">
               <span class="node-name">${escapeHtml(n.name)}</span>
@@ -325,9 +444,11 @@
               Memory <span>${n.memory_used_mb.toFixed(0)} / ${n.memory_total_mb.toFixed(0)} MiB (${n.memory_percent.toFixed(1)}%)</span>
               <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, n.memory_percent)}%"></div></div>
             </div>
+            ${gpuHtml}
             ${n.current_task_id ? `<div class="metric-row">Task: <span>${escapeHtml(n.current_task_id)}</span></div>` : ''}
           </div>
-        `).join('');
+        `;
+        }).join('');
       } catch (err) {
         grid.innerHTML = '<div class="empty">Failed to load nodes</div>';
       }
@@ -349,6 +470,63 @@
       return Math.round(total / tasks.length);
     }
 
+    function formatDuration(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return '—';
+      const totalSec = Math.round(ms / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      const pad = (n) => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    }
+
+    function progressCellHtml(job, tasks) {
+      const transcodePct = jobProgress(job, tasks);
+      const status = job.status;
+
+      if (status === 'completed' && !job.error) {
+        if (job.started_at && job.finished_at) {
+          const elapsed = new Date(job.finished_at) - new Date(job.started_at);
+          return `<span class="duration-pill">⏱ ${escapeHtml(formatDuration(elapsed))}</span>`;
+        }
+        return '100%';
+      }
+      if (status === 'failed') {
+        return '<span style="color:var(--danger);font-size:0.8rem">failed</span>';
+      }
+
+      if (status === 'uploading') {
+        return `
+          <div class="stage-progress">
+            <div class="stage-label"><span>Uploading…</span><span></span></div>
+            <div class="stage-bar"><div class="stage-fill upload indeterminate"></div></div>
+          </div>`;
+      }
+      if (status === 'queued' || status === 'splitting') {
+        return `
+          <div class="stage-progress">
+            <div class="stage-label"><span>${escapeHtml(status === 'queued' ? 'Queued' : 'Splitting…')}</span><span></span></div>
+            <div class="stage-bar"><div class="stage-fill transcode indeterminate"></div></div>
+          </div>`;
+      }
+      if (status === 'running') {
+        const pct = typeof transcodePct === 'number' ? transcodePct : 0;
+        return `
+          <div class="stage-progress">
+            <div class="stage-label"><span>Transcoding</span><span>${pct}%</span></div>
+            <div class="stage-bar"><div class="stage-fill transcode" style="width:${pct}%"></div></div>
+          </div>`;
+      }
+      if (status === 'merging') {
+        return `
+          <div class="stage-progress">
+            <div class="stage-label"><span>Merging…</span><span></span></div>
+            <div class="stage-bar"><div class="stage-fill merge indeterminate"></div></div>
+          </div>`;
+      }
+      return typeof transcodePct === 'number' ? transcodePct + '%' : transcodePct;
+    }
+
     async function loadJobs() {
       const tbody = document.getElementById('jobsBody');
       try {
@@ -361,7 +539,7 @@
 
         tbody.innerHTML = jobs.map(job => {
           const tasks = job.tasks || [];
-          const progress = jobProgress(job, tasks);
+          const progressHtml = progressCellHtml(job, tasks);
 
           const taskHtml = tasks.length
             ? `<ul class="task-list">${tasks.map(t => {
@@ -391,7 +569,7 @@
               <td><code>${escapeHtml(job.job_id)}</code></td>
               <td>${escapeHtml(job.filename)}</td>
               <td><span class="badge badge-${escapeHtml(badge)}">${escapeHtml(label)}</span></td>
-              <td>${typeof progress === 'number' ? progress + '%' : progress}</td>
+              <td>${progressHtml}</td>
               <td>${escapeHtml(job.resolution)} · ${escapeHtml(job.format)} · ${escapeHtml(job.bitrate)}<br>${Number(job.segment_count || 0)} segments / ${Number(job.task_count || 0)} batches</td>
               <td>${taskHtml}</td>
               <td>${actions}</td>
