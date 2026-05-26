@@ -229,6 +229,41 @@
     }
     .metric-fill.gpu { background: #10b981; }
     .metric-fill.gpu-mem { background: #8b5cf6; }
+    .mode-badge {
+      display: inline-block;
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-left: 0.5rem;
+      vertical-align: middle;
+    }
+    .mode-standard {
+      background: rgba(34, 197, 94, 0.18);
+      color: var(--success);
+      border: 1px solid rgba(34, 197, 94, 0.45);
+    }
+    .mode-worker {
+      background: rgba(245, 158, 11, 0.18);
+      color: var(--warning);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      animation: pulse-warn 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse-warn {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.35); }
+      50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
+    }
+    .manager-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+    }
+    .manager-card.mode-worker-bg {
+      border-color: rgba(245, 158, 11, 0.55);
+    }
     .gpu-unavailable {
       font-size: 0.8rem;
       color: var(--muted);
@@ -367,6 +402,13 @@
             <div class="stage-fill upload" id="uploadFill" style="width:0%"></div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Manager Node</h2>
+      <div id="managerCard" class="manager-card">
+        <div class="empty" style="padding:0.8rem">Loading manager…</div>
       </div>
     </section>
 
@@ -541,7 +583,60 @@
     }
 
     async function refresh() {
-      await Promise.all([loadNodes(), loadJobs()]);
+      await Promise.all([loadManager(), loadNodes(), loadJobs()]);
+    }
+
+    async function loadManager() {
+      const card = document.getElementById('managerCard');
+      try {
+        const res = await fetch('/manager/info');
+        if (!res.ok) {
+          card.innerHTML = '<div class="empty" style="padding:0.8rem">Manager info unavailable</div>';
+          return;
+        }
+        const m = await res.json();
+        const mode = (m.mode === 'worker') ? 'worker' : 'standard';
+        const modeLabel = (mode === 'worker') ? 'Worker Mode' : 'Standard Mode';
+        const gpuPct = Number(m.gpu_percent || 0);
+        const gpuMemUsed = Number(m.gpu_memory_used_mb || 0);
+        const gpuMemTotal = Number(m.gpu_memory_total_mb || 0);
+        const gpuMemPct = Number(m.gpu_memory_percent || 0);
+        const gpuName = m.gpu_name ? ` · ${escapeHtml(m.gpu_name)}` : '';
+        const gpuHtml = m.gpu_available
+          ? `
+            <div class="metric-row">
+              GPU${gpuName} <span>${gpuPct.toFixed(1)}%</span>
+              <div class="metric-bar"><div class="metric-fill gpu" style="width:${Math.min(100, gpuPct)}%"></div></div>
+            </div>
+            <div class="metric-row">
+              GPU Mem <span>${gpuMemUsed.toFixed(0)} / ${gpuMemTotal.toFixed(0)} MiB (${gpuMemPct.toFixed(1)}%)</span>
+              <div class="metric-bar"><div class="metric-fill gpu-mem" style="width:${Math.min(100, gpuMemPct)}%"></div></div>
+            </div>`
+          : '<div class="gpu-unavailable">GPU: not available</div>';
+
+        card.className = 'manager-card' + (mode === 'worker' ? ' mode-worker-bg' : '');
+        card.innerHTML = `
+          <div class="node-header">
+            <span class="node-name">manager
+              <span class="mode-badge mode-${mode}">${modeLabel}</span>
+            </span>
+            <span class="status-label" title="${escapeHtml(m.current_task_id || 'idle')}">
+              ${m.current_task_id ? 'Encoding: <code>' + escapeHtml(m.current_task_id) + '</code>' : 'No task'}
+            </span>
+          </div>
+          <div class="metric-row">
+            CPU <span>${Number(m.cpu_percent || 0).toFixed(1)}%</span>
+            <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, m.cpu_percent || 0)}%"></div></div>
+          </div>
+          <div class="metric-row">
+            Memory <span>${Number(m.memory_used_mb || 0).toFixed(0)} / ${Number(m.memory_total_mb || 0).toFixed(0)} MiB (${Number(m.memory_percent || 0).toFixed(1)}%)</span>
+            <div class="metric-bar"><div class="metric-fill" style="width:${Math.min(100, m.memory_percent || 0)}%"></div></div>
+          </div>
+          ${gpuHtml}
+        `;
+      } catch (err) {
+        card.innerHTML = '<div class="empty" style="padding:0.8rem">Failed to load manager info</div>';
+      }
     }
 
     function escapeHtml(value) {
@@ -696,7 +791,8 @@
 
           const taskHtml = tasks.length
             ? `<ul class="task-list">${tasks.map(t => {
-                const worker = t.assigned_worker ? ` → ${escapeHtml(t.assigned_worker)}` : '';
+                const workerName = t.assigned_worker === '__manager__' ? 'manager (helper)' : t.assigned_worker;
+                const worker = workerName ? ` → ${escapeHtml(workerName)}` : '';
                 const cls = t.status === 'running' ? 'task-running' : '';
                 const prog = t.status === 'running' ? ` <span class="progress-mini">${t.progress}%</span>` : '';
                 const attempts = t.attempts ? ` · retry ${t.attempts}` : '';

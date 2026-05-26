@@ -4,12 +4,17 @@ services:
     container_name: manager
     ports:
       - "8080:8080"
+    gpus: all
     volumes:
       - ./shared-volume:/data
     environment:
       DATA_DIR: /data
       HEARTBEAT_TIMEOUT: "15"
       HEARTBEAT_FAILURE_THRESHOLD: "3"
+      VIDEO_ENCODER: auto
+      FFMPEG_THREADS: "2"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
       SEGMENT_DURATION: "10"
       MAX_SEGMENTS: "90"
       TASK_BATCH_SIZE: "5"

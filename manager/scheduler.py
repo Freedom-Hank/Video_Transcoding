@@ -9,6 +9,10 @@ DEFAULT_RESOLUTION = "1280x720"
 DEFAULT_FORMAT = "mp4"
 DEFAULT_BITRATE = "2M"
 
+MANAGER_NODE_NAME = "__manager__"
+MODE_STANDARD = "standard"
+MODE_WORKER = "worker"
+
 
 class Scheduler:
     def __init__(
@@ -29,7 +33,77 @@ class Scheduler:
         self.task_timeout_seconds = task_timeout_seconds
         self.task_batch_size = max(1, task_batch_size)
         self.max_concurrent_jobs = max(1, max_concurrent_jobs)
+        self.manager_mode = MODE_STANDARD
         self._load_state()
+
+    def register_manager(self) -> dict:
+        """Register the manager itself as a pseudo-node for the manager-worker mode."""
+        with self.lock:
+            self.nodes[MANAGER_NODE_NAME] = {
+                "name": MANAGER_NODE_NAME,
+                "status": "idle",
+                "last_heartbeat_at": datetime.now(timezone.utc),
+                "missed_heartbeats": 0,
+                "current_task_id": None,
+                "cpu_percent": 0.0,
+                "memory_percent": 0.0,
+                "memory_used_mb": 0.0,
+                "memory_total_mb": 0.0,
+                "gpu_available": False,
+                "gpu_percent": 0.0,
+                "gpu_memory_used_mb": 0.0,
+                "gpu_memory_total_mb": 0.0,
+                "gpu_memory_percent": 0.0,
+                "gpu_name": "",
+                "is_manager": True,
+            }
+            return self.nodes[MANAGER_NODE_NAME]
+
+    def evaluate_manager_mode(self) -> str:
+        """Decide whether the manager should be in worker mode and apply the change."""
+        with self.lock:
+            active_jobs = any(
+                j["status"] in ("splitting", "running", "merging")
+                for j in self.jobs.values()
+            )
+            worker_nodes = [
+                n for n in self.nodes.values() if not n.get("is_manager")
+            ]
+            any_offline = any(n["status"] == "offline" for n in worker_nodes)
+            all_healthy = bool(worker_nodes) and all(
+                n["status"] in ("idle", "busy") for n in worker_nodes
+            )
+
+            if self.manager_mode == MODE_STANDARD:
+                if active_jobs and any_offline:
+                    self.manager_mode = MODE_WORKER
+            else:  # MODE_WORKER
+                if not active_jobs and all_healthy:
+                    self.manager_mode = MODE_STANDARD
+            return self.manager_mode
+
+    def get_manager_node(self) -> dict | None:
+        with self.lock:
+            node = self.nodes.get(MANAGER_NODE_NAME)
+            if not node:
+                return None
+            return {
+                "name": node["name"],
+                "status": node["status"],
+                "last_heartbeat_at": _iso(node.get("last_heartbeat_at")),
+                "current_task_id": node.get("current_task_id"),
+                "cpu_percent": node.get("cpu_percent", 0.0),
+                "memory_percent": node.get("memory_percent", 0.0),
+                "memory_used_mb": node.get("memory_used_mb", 0.0),
+                "memory_total_mb": node.get("memory_total_mb", 0.0),
+                "gpu_available": node.get("gpu_available", False),
+                "gpu_percent": node.get("gpu_percent", 0.0),
+                "gpu_memory_used_mb": node.get("gpu_memory_used_mb", 0.0),
+                "gpu_memory_total_mb": node.get("gpu_memory_total_mb", 0.0),
+                "gpu_memory_percent": node.get("gpu_memory_percent", 0.0),
+                "gpu_name": node.get("gpu_name", ""),
+                "mode": self.manager_mode,
+            }
 
     def register_worker(self, name: str) -> dict:
         with self.lock:
@@ -93,6 +167,8 @@ class Scheduler:
             now = datetime.now(timezone.utc)
             to_offline: list[str] = []
             for name, node in list(self.nodes.items()):
+                if node.get("is_manager"):
+                    continue
                 if node["status"] == "offline":
                     continue
                 last = node.get("last_heartbeat_at")
@@ -571,6 +647,7 @@ class Scheduler:
                     "gpu_name": n.get("gpu_name", ""),
                 }
                 for n in self.nodes.values()
+                if not n.get("is_manager")
             ]
 
     def _register_worker_locked(self, name: str):

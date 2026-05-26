@@ -10,6 +10,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from health_monitor import HealthMonitor
+from manager_worker import manager_heartbeat_loop, manager_worker_loop
 from merger import merge_segments
 from scheduler import Scheduler
 from splitter import plan_video_segments
@@ -70,6 +71,7 @@ health_monitor = HealthMonitor(
 def process_job_queue():
     while True:
         try:
+            scheduler.evaluate_manager_mode()
             for job_id in scheduler.claim_jobs_for_split():
                 threading.Thread(
                     target=_process_new_job,
@@ -406,6 +408,14 @@ def list_nodes():
     return jsonify(scheduler.list_nodes())
 
 
+@app.route("/manager/info", methods=["GET"])
+def manager_info():
+    info = scheduler.get_manager_node()
+    if info is None:
+        return jsonify({"error": "Manager node not initialized"}), 503
+    return jsonify(info)
+
+
 @app.route("/nodes/register", methods=["POST"])
 def register_node():
     data = request.get_json(silent=True) or {}
@@ -482,6 +492,13 @@ def handle_file_too_large(_exc):
 
 
 if __name__ == "__main__":
+    scheduler.register_manager()
     health_monitor.start()
     threading.Thread(target=process_job_queue, daemon=True).start()
+    threading.Thread(
+        target=manager_heartbeat_loop, args=(scheduler,), daemon=True
+    ).start()
+    threading.Thread(
+        target=manager_worker_loop, args=(scheduler,), daemon=True
+    ).start()
     app.run(host="0.0.0.0", port=8080, threaded=True)
