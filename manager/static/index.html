@@ -115,7 +115,8 @@
       display: inline-block;
       margin-right: 6px;
     }
-    .status-idle .status-dot, .status-busy .status-dot { background: var(--success); }
+    .status-idle .status-dot { background: var(--success); } 
+    .status-busy .status-dot { background: var(--danger); }
     .status-suspected .status-dot { background: var(--warning); }
     .status-offline .status-dot { background: var(--danger); }
     .status-offline { color: var(--danger); }
@@ -183,12 +184,36 @@
     .badge-completed { background: rgba(34, 197, 94, 0.2); color: var(--success); }
     .badge-failed { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
     .task-list {
-      margin-top: 0.5rem;
-      font-size: 0.8rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font-size: 0.78rem;
       color: var(--muted);
     }
-    .task-list li { margin: 0.2rem 0; }
+    .task-list li {
+      margin: 0;
+      padding: 2px 0;
+      line-height: 1.35;
+      word-break: break-word;
+    }
     .task-running { color: var(--accent); }
+    .tasks-cell {
+      max-height: 110px;
+      overflow-y: auto;
+      padding-right: 6px;
+      min-width: 180px;
+    }
+    .tasks-cell::-webkit-scrollbar { width: 6px; }
+    .tasks-cell::-webkit-scrollbar-track { background: transparent; }
+    .tasks-cell::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+    .tasks-cell::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    .tasks-cell {
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
     .empty { color: var(--muted); text-align: center; padding: 2rem; }
     a.download {
       color: var(--accent);
@@ -706,7 +731,7 @@
               <td><span class="badge badge-${escapeHtml(badge)}">${escapeHtml(label)}</span></td>
               <td>${progressHtml}</td>
               <td class="col-settings">${escapeHtml(job.resolution)} · ${escapeHtml(job.format)} · ${escapeHtml(job.bitrate)}<br>${Number(job.segment_count || 0)} segments / ${Number(job.task_count || 0)} batches</td>
-              <td>${taskHtml}</td>
+              <td><div class="tasks-cell">${taskHtml}</div></td>
               <td>${actions}</td>
             </tr>
           `;
