@@ -1,211 +1,169 @@
-# 分散式影片轉檔系統
+# VideoMaestro
 
-這是一個以 `manager` / `worker` 架構實作的分散式影片轉檔專案。系統會先讀取上傳影片長度，將影片規劃成多個時間區間任務，再把任務分派到多個 Worker 平行編碼，最後由 Manager 合併成最終輸出檔。
+> A distributed, fault-tolerant video transcoding cluster with chunked uploads, GPU acceleration, and a manager-worker failover mode.
 
-專案提供網頁管理介面，可用來上傳影片、查看任務狀態、監看 Worker 節點健康狀況，並下載已完成的輸出結果。
+VideoMaestro splits an uploaded video into time-based segments, encodes them in parallel across multiple GPU-accelerated worker containers, and merges the result. When a worker dies mid-job, the manager itself steps in as an emergency encoder until the job finishes and all workers recover.
 
-## 特色
+Built to demonstrate practical distributed-systems concepts: leader-coordinated work distribution, pull-based task queues, heartbeat-driven failure detection, multi-tenant isolation, and zero-downtime failover.
 
-- 影片上傳後自動建立轉檔工作
-- Manager 只規劃時間區間，不再預先產生實體切片檔
-- 多個 Worker 直接從共用原始影片讀取指定時間區間並平行編碼
-- Worker 可使用 NVIDIA NVENC 進行 GPU 硬體加速，並可 fallback 到 CPU 編碼
-- Worker 會自動註冊、輪詢任務並回報進度
-- 支援節點心跳監控與失聯任務重排
-- 提供簡單的 Web UI 與 REST API
-- 使用 Docker Compose 一次啟動 Manager 與多個 Worker
+---
 
-## 系統架構
+## Features
 
-- `manager`
-  - 提供 Web UI
-  - 接收上傳、建立工作、查詢工作狀態
-  - 負責時間區間規劃、合併與任務排程
-  - 監控 Worker 心跳與健康狀態
-- `worker`
-  - 啟動後向 Manager 註冊
-  - 輪詢取得編碼任務
-  - 使用 FFmpeg 對指定時間區間進行轉檔
-  - 回報進度、完成與失敗狀態
-- `shared-volume`
-  - 由主機資料夾掛載到容器內的 `/data`
-  - 保存 `uploads/`、`segments/`、`outputs/`
+- **Distributed encoding** — 1 Manager + 3 Workers (Docker Compose), horizontally scalable
+- **GPU acceleration** — NVIDIA NVENC (`h264_nvenc`) with automatic `libx264` fallback
+- **Chunked upload** — 50 MB chunks to bypass HTTP body limits (e.g., Cloudflare's 100 MB cap)
+- **Multi-user isolation** — Browser-generated owner tokens; users can only delete their own jobs
+- **FIFO job queue** — Strict ordering, configurable concurrency (`MAX_CONCURRENT_JOBS`)
+- **Storage protection** — Per-file and total `uploads/` caps; automatic cleanup after completion
+- **Failover** — Manager auto-enters Worker Mode when any worker is offline and an active job exists; returns to Standard Mode after the job ends and all workers recover
+- **Live monitoring** — Per-node CPU / Memory / GPU; three-stage progress bars (upload → transcode → merge); transcoding duration timer
+- **Remote access** — Cloudflare Tunnel integration for HTTPS exposure without port forwarding
 
-## 專案目錄
+## Architecture
 
-```text
-├── compose.yaml
-├── manager/
-│   ├── app.py
-│   ├── scheduler.py
-│   ├── splitter.py
-│   ├── merger.py
-│   ├── health_monitor.py
-│   └── static/index.html
-└── worker/
-    ├── app.py
-    ├── encoder.py
-    └── metrics.py
+```mermaid
+graph LR
+    USER[使用者瀏覽器]
+    CF[Cloudflare Tunnel]
+    MGR[Manager<br/>接收 / 派工 / 合併]
+    W1[Worker-1]
+    W2[Worker-2]
+    W3[Worker-3]
+    VOL[(shared-volume)]
+    GPU[(GPU / NVENC)]
+
+    USER --> CF --> MGR
+    MGR <--> W1
+    MGR <--> W2
+    MGR <--> W3
+    MGR -.檔案.- VOL
+    W1 -.檔案.- VOL
+    W2 -.檔案.- VOL
+    W3 -.檔案.- VOL
+    MGR -.編碼.- GPU
+    W1 -.編碼.- GPU
+    W2 -.編碼.- GPU
+    W3 -.編碼.- GPU
 ```
 
-## 需求
+See [`docs/architecture.md`](docs/architecture.md) for the full breakdown.
 
-- Docker
-- Docker Compose
+## Quick Start
 
-容器內已安裝：
+### Requirements
+- Docker Desktop (Windows / Linux / macOS)
+- *(Optional)* NVIDIA GPU + NVIDIA Container Toolkit for hardware encoding
+- *(Optional)* [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for remote access
 
-- `ffmpeg`
-- `ffprobe`
-- `procps`（Worker 端用於讀取 `top`）
-
-## 快速開始
-
-### 1. 啟動服務
-
-```bash
-docker compose up --build
-```
-
-啟動後，開啟：
-
-```text
-http://localhost:8080
-```
-
-### 2. 背景執行
+### Run
 
 ```bash
 docker compose up -d --build
+# Open http://localhost:8080
 ```
 
-### 3. 停止服務
+**Windows one-click**:
 
-```bash
-docker compose down
+```powershell
+.\video_transcoding_menu.bat
+# Option 1: clean state + rebuild + open browser + start Cloudflare Tunnel
 ```
 
-## 使用流程
+## Documentation
 
-1. 在 Manager 網頁上傳影片。
-2. 選擇輸出解析度、格式與位元率。
-3. Manager 使用 `ffprobe` 讀取影片長度，規劃時間區間任務。
-4. Worker 依序從任務佇列領取時間區間批次並平行編碼。
-5. 所有片段完成後，Manager 將結果合併成單一輸出檔。
-6. 工作完成後，可從管理介面下載成品。
+A full project report and topic-focused diagrams:
 
-## 預設行為
+| Topic | File |
+|---|---|
+| Project Report | [`PROJECT_REPORT.md`](PROJECT_REPORT.md) |
+| System Architecture | [`docs/architecture.md`](docs/architecture.md) |
+| Job Lifecycle | [`docs/job-lifecycle.md`](docs/job-lifecycle.md) |
+| Chunked Upload Flow | [`docs/upload-flow.md`](docs/upload-flow.md) |
+| Task Dispatch | [`docs/task-dispatch.md`](docs/task-dispatch.md) |
+| Manager Failover Mode | [`docs/manager-mode.md`](docs/manager-mode.md) |
 
-- 預設輸出解析度：`1280x720`
-- 預設輸出格式：`mp4`
-- 預設位元率：`2M`
-- 預設時間區間最低長度：`10` 秒
-- 預設最多規劃 `90` 個時間區間
-- 預設每個 Worker 任務處理 `5` 個時間區間
-- Worker 預設自動偵測並優先使用 NVIDIA NVENC
-- Worker 預設每 `2` 秒輪詢一次任務
-- Worker 預設每 `5` 秒回報一次心跳
+## Tech Stack
 
-## API 說明
+| Layer | Tech |
+|---|---|
+| Backend | Python 3.12 · Flask 3.0 |
+| Encoding | FFmpeg · NVENC (`h264_nvenc`) · `libx264` |
+| Containers | Docker Compose |
+| Frontend | Vanilla HTML / CSS / JavaScript (no framework) |
+| Remote Access | Cloudflare Tunnel |
+| Persistence | JSON state file |
 
-### Manager API
+## Project Structure
 
-| 方法 | 路徑 | 說明 |
-|------|------|------|
-| `POST` | `/jobs` | 建立轉檔工作，表單欄位包含 `video`、`resolution`、`format`、`bitrate` |
-| `GET` | `/jobs` | 列出所有工作 |
-| `GET` | `/jobs/:id` | 取得單一工作詳情與片段狀態 |
-| `DELETE` | `/jobs/:id` | 刪除尚未開始處理的排隊工作 |
-| `GET` | `/jobs/:id/download` | 下載已完成的輸出檔 |
-| `GET` | `/nodes` | 列出所有 Worker 節點與資源使用狀態 |
-| `POST` | `/nodes/register` | Worker 啟動時註冊節點 |
-| `POST` | `/nodes/:name/heartbeat` | Worker 回報心跳與系統資源資訊 |
-| `GET` | `/workers/:name/task` | Worker 輪詢取得下一個任務 |
-| `POST` | `/workers/:name/task/:id/progress` | 回報任務進度 |
-| `POST` | `/workers/:name/task/:id/complete` | 回報任務完成 |
-| `POST` | `/workers/:name/task/:id/fail` | 回報任務失敗並重新排隊 |
+```text
+video_transcoding/
+├── manager/
+│   ├── app.py              # Flask entry, HTTP endpoints
+│   ├── scheduler.py        # State machine + concurrency control
+│   ├── splitter.py         # Time-based segmentation planning
+│   ├── merger.py           # FFmpeg concat demuxer
+│   ├── health_monitor.py   # Worker heartbeat watcher
+│   ├── manager_worker.py   # Failover encoding loop
+│   ├── encoder.py          # FFmpeg wrapper
+│   ├── metrics.py          # CPU / Mem / GPU collector
+│   └── static/index.html   # Web UI
+├── worker/
+│   ├── app.py              # Pull-based task loop
+│   ├── encoder.py
+│   └── metrics.py
+├── docs/                   # Mermaid diagrams
+├── PROJECT_REPORT.md
+├── compose.yaml
+└── video_transcoding_menu.bat
+```
 
-### Worker API
+## Key Environment Variables
 
-| 方法 | 路徑 | 說明 |
-|------|------|------|
-| `GET` | `/task` | 查詢本機是否忙碌 |
-| `GET` | `/metrics` | 回傳 CPU 與記憶體資訊 |
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_CONCURRENT_JOBS` | `1` | Active jobs allowed at once |
+| `MAX_UPLOAD_MB` | `2048` | Single-file size cap |
+| `MAX_UPLOADS_TOTAL_MB` | `10240` | Total `uploads/` directory cap |
+| `UPLOAD_CHUNK_SIZE_MB` | `50` | Chunk size for client uploads |
+| `SEGMENT_DURATION` | `10` | Seconds per segment |
+| `MAX_SEGMENTS` | `90` | Max segments per job |
+| `TASK_BATCH_SIZE` | `5` | Segments per task batch |
+| `HEARTBEAT_INTERVAL` | `5` | Worker heartbeat interval (sec) |
+| `HEARTBEAT_TIMEOUT` | `15` | Manager timeout threshold (sec) |
+| `HEARTBEAT_FAILURE_THRESHOLD` | `3` | Consecutive misses → offline |
+| `TASK_TIMEOUT_SECONDS` | `3600` | Task execution timeout |
+| `MAX_TASK_RETRIES` | `3` | Per-task retry limit |
+| `VIDEO_ENCODER` | `auto` | `auto` prefers NVENC, falls back to `libx264` |
 
-## 任務流程
+## API Summary
 
-1. 上傳影片後，Manager 會先建立工作紀錄。
-2. 工作進入 `splitting` 狀態後，Manager 使用 `ffprobe` 規劃時間區間，不產生 raw segment 檔案。
-3. Manager 會把多個時間區間包成批次任務。
-4. Worker 從任務佇列中領取批次任務，直接讀取原始影片的指定時間區間並進行編碼。
-5. Worker 會持續回報進度，完成後上報輸出檔位置。
-6. 當所有片段都完成後，Manager 會將片段合併成最終檔案。
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/jobs/upload-init` | Begin chunked upload (returns `job_id`, `chunk_size`) |
+| `POST` | `/jobs/{id}/chunks/{i}` | Upload chunk `i` (sequential) |
+| `POST` | `/jobs/{id}/upload-complete` | Finalize upload, enqueue |
+| `GET` | `/jobs` | List all jobs |
+| `GET` | `/jobs/{id}` | Job detail + task progress |
+| `DELETE` | `/jobs/{id}` | Delete own queued job (requires `X-Owner-Id`) |
+| `GET` | `/jobs/{id}/download` | Download final output |
+| `GET` | `/nodes` | Worker status + CPU/Mem/GPU |
+| `GET` | `/manager/info` | Manager status + mode (Standard/Worker) |
+| `POST` | `/nodes/register` | Worker registration (internal) |
+| `POST` | `/nodes/{name}/heartbeat` | Worker heartbeat + metrics (internal) |
+| `GET` | `/workers/{name}/task` | Worker task pull (internal) |
+| `POST` | `/workers/{name}/task/{id}/progress` | Worker progress report (internal) |
+| `POST` | `/workers/{name}/task/{id}/complete` | Worker completion report (internal) |
+| `POST` | `/workers/{name}/task/{id}/fail` | Worker failure report (internal) |
 
-## 容錯與健康監控
+## Design Highlights
 
-- Worker 會定期送出心跳與系統資源數據。
-- Manager 超過心跳逾時後會先標記節點為 `suspected`。
-- 若連續多次逾時，節點會被標記為 `offline`。
-- 離線節點正在處理中的任務會被重新排回佇列。
-- Worker 重新啟動並再次註冊後，會自動恢復可派工狀態。
+- **Logical segmentation, not physical**: the splitter only computes `(start_time, duration)` tuples; workers seek into the shared source file with `ffmpeg -ss -t`. No source-file copies are written.
+- **Pull-based dispatch**: workers poll the manager every 2s. The manager never tracks worker availability — workers self-select when idle.
+- **Three failure modes, three policies**: explicit worker failure increments retry count; worker offline does not (it's not the task's fault); task timeout increments retry count.
+- **Concat without re-encoding**: all segments share identical encoding parameters, so the final merge uses FFmpeg's `concat` demuxer with `-c copy` — a few seconds, no GPU.
+- **State recovery**: on manager restart, in-flight tasks are requeued, half-uploaded jobs are failed, and the JSON state file restores the world.
 
-## 環境變數
+## License
 
-### Manager
-
-| 變數 | 預設值 | 說明 |
-|------|--------|------|
-| `DATA_DIR` | `/data` | 共用資料目錄 |
-| `SEGMENT_DURATION` | `10` | 每個時間區間的最低秒數 |
-| `MAX_SEGMENTS` | `90` | 依影片長度自動提高區間秒數，避免產生過多任務 |
-| `TASK_BATCH_SIZE` | `5` | 每個 Worker 任務一次處理的時間區間數 |
-| `HEARTBEAT_TIMEOUT` | `15` | 心跳逾時秒數 |
-| `HEARTBEAT_FAILURE_THRESHOLD` | `3` | 判定離線前的連續逾時次數 |
-| `TASK_TIMEOUT_SECONDS` | `3600` | 單個批次任務逾時秒數 |
-| `MAX_TASK_RETRIES` | `3` | 批次任務失敗後的最大重試次數 |
-| `MAX_UPLOAD_MB` | `2048` | 上傳檔案大小上限 MB |
-
-### Worker
-
-| 變數 | 預設值 | 說明 |
-|------|--------|------|
-| `WORKER_NAME` | `worker-1` | Worker 節點名稱 |
-| `MANAGER_URL` | `http://manager:8080` | Manager 位址 |
-| `DATA_DIR` | `/data` | 共用資料目錄 |
-| `POLL_INTERVAL` | `2` | 輪詢任務間隔秒數 |
-| `HEARTBEAT_INTERVAL` | `5` | 心跳間隔秒數 |
-| `VIDEO_ENCODER` | `auto` | `auto` 會優先使用 `h264_nvenc`，不可用時 fallback 到 `libx264` |
-| `FFMPEG_THREADS` | `2` | CPU fallback 編碼時的 FFmpeg thread 數 |
-
-## Docker Compose
-
-`compose.yaml` 預設會啟動：
-
-- `manager`
-- `worker-1`
-- `worker-2`
-- `worker-3`
-
-如果要擴充 Worker，可以複製現有 Worker 服務區塊，並替每個節點設定不同的 `WORKER_NAME`。
-
-## 資料位置
-
-容器內部資料會寫到 `/data`，包含：
-
-- `/data/uploads`：原始上傳檔
-- `/data/segments`：Worker 編碼後的時間區間輸出片段
-- `/data/outputs`：最後合併完成的成品
-
-## 注意事項
-
-- 時間區間規劃依賴 `ffprobe`，編碼與合併依賴 FFmpeg，容器內已內建安裝。
-- GPU 加速需要 Docker Desktop 可使用 NVIDIA runtime，且 FFmpeg 支援 `h264_nvenc`。
-- 目前系統是以 Docker Compose 單機環境為主，適合展示、測試或小型部署。
-- 只有狀態為 `queued` 的工作可以刪除。
-
-## 開發補充
-
-Manager 與 Worker 都是 Flask 應用。若你想直接檢查行為，可以分別查看：
-
-- [Manager 入口](/Volumes/Work_Data/Video_Transcoding/manager/app.py)
-- [Worker 入口](/Volumes/Work_Data/Video_Transcoding/worker/app.py)
+MIT

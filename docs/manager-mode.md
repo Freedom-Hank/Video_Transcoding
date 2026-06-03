@@ -1,27 +1,18 @@
-# Manager-Mode
+# Manager 模式切換
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Standard: app startup
+    [*] --> 標準模式
 
-    Standard --> Worker: active_jobs == True<br/>AND any_worker.status == offline
-    Worker --> Standard: active_jobs == False<br/>AND all_workers in (idle, busy)
+    標準模式: 標準模式<br/>(接收 / 派工 / 合併)
+    工人模式: 工人模式<br/>(以上 + 自己編碼)
 
-    state Standard {
-        [*] --> Idle_Std
-        Idle_Std: Manager only does<br/>HTTP / scheduling / health<br/>/ splitting / merging
-    }
-
-    state Worker {
-        [*] --> Encoding
-        Encoding: Manager pulls tasks via<br/>fetch_task_for_worker(__manager__)<br/>and runs ffmpeg in-process
-        Encoding: HTTP / scheduling / merging<br/>continue in parallel threads
-    }
-
-    note right of Worker
-        Triggered by worker offline.
-        Manager keeps helping until
-        BOTH: current job ends
-        AND all 3 workers healthy.
-    end note
+    標準模式 --> 工人模式: 有 Job 在跑<br/>且 任一 Worker 離線
+    工人模式 --> 標準模式: 該 Job 結束<br/>且 全部 Worker 都回來
 ```
+
+## 重點
+
+- **觸發**:有 Worker 離線且當前有 Job 在執行 → Manager 自動下場一起編碼。
+- **復原**:必須同時滿足「Job 結束」與「全部 Worker 恢復在線」,Manager 才回到標準模式。
+- **不中斷**:模式切換不會打斷正在進行中的 ffmpeg,只決定要不要拉新任務。

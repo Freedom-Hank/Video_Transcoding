@@ -1,51 +1,33 @@
-# Architecture
+# 系統架構
 
 ```mermaid
 graph LR
-    subgraph external["External"]
-        BROWSER[User Browser]
-        CF[Cloudflare Tunnel<br/>cloudflared on host]
-    end
+    USER[使用者瀏覽器]
+    CF[Cloudflare Tunnel]
+    MGR[Manager<br/>接收 / 派工 / 合併]
+    W1[Worker-1]
+    W2[Worker-2]
+    W3[Worker-3]
+    VOL[(shared-volume)]
+    GPU[(GPU / NVENC)]
 
-    subgraph host["Host PC (Docker Desktop + GPU)"]
-        subgraph net["transcoding-net (bridge)"]
-            MGR["Manager Container<br/>Flask :8080<br/>+ encoder + metrics<br/>+ manager_worker"]
-            W1["Worker-1<br/>ffmpeg + NVENC"]
-            W2["Worker-2<br/>ffmpeg + NVENC"]
-            W3["Worker-3<br/>ffmpeg + NVENC"]
-        end
-
-        subgraph vol["shared-volume (bind mount)"]
-            UP[uploads/]
-            SEG[segments/]
-            OUT[outputs/]
-            STATE[manager_state.json]
-        end
-
-        GPU[(NVIDIA GPU<br/>shared via NVENC)]
-    end
-
-    BROWSER -->|HTTPS| CF
-    CF -->|http://localhost:8080| MGR
-    BROWSER -.->|LAN: http://localhost:8080| MGR
-
-    MGR <-->|HTTP: register/heartbeat/<br/>task poll/progress/complete| W1
-    MGR <-->|HTTP| W2
-    MGR <-->|HTTP| W3
-
-    MGR -.read/write.-> UP
-    MGR -.read/write.-> SEG
-    MGR -.write.-> OUT
-    MGR -.persist.-> STATE
-    W1 -.read.-> UP
-    W1 -.write.-> SEG
-    W2 -.read.-> UP
-    W2 -.write.-> SEG
-    W3 -.read.-> UP
-    W3 -.write.-> SEG
-
-    MGR -. NVENC .-> GPU
-    W1 -. NVENC .-> GPU
-    W2 -. NVENC .-> GPU
-    W3 -. NVENC .-> GPU
+    USER --> CF --> MGR
+    MGR <--> W1
+    MGR <--> W2
+    MGR <--> W3
+    MGR -.檔案.- VOL
+    W1 -.檔案.- VOL
+    W2 -.檔案.- VOL
+    W3 -.檔案.- VOL
+    MGR -.編碼.- GPU
+    W1 -.編碼.- GPU
+    W2 -.編碼.- GPU
+    W3 -.編碼.- GPU
 ```
+
+## 重點
+
+- **Manager**:對外接收上傳、對內派工與合併。
+- **Worker × 3**:主動向 Manager 拉任務,執行 GPU 編碼。
+- **shared-volume**:容器間透過共享磁碟交換影片片段。
+- **Cloudflare Tunnel**:提供對外的 HTTPS 網址,不必開放路由器埠。
